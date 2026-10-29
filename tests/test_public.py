@@ -26,7 +26,8 @@ PRIVATE_IP = re.compile(
 )
 # Whole words, any case. "ormus" alone stays allowed (the plugin id ormus.hypr-gamepad-map, the
 # HermeticOrmus account); only the possessive is banned.
-WORDS = ["ormus's", "ormus’s", "diego", "sg", "mars", "moon", "corvin", "corvin-server", "tailscale",
+# The copyright holder's name (LICENSE, the README footer) is meant to be there.
+WORDS = ["ormus's", "ormus’s", "sg", "mars", "moon", "corvin", "corvin-server", "tailscale",
          "raven", "alqvimia", "biogenesis", "zapfast", "aegis"]
 PRIVATE_WORD = re.compile(
     r"(?<![A-Za-z0-9])(?:" + "|".join(re.escape(w) for w in WORDS) + r")(?![A-Za-z0-9])", re.IGNORECASE

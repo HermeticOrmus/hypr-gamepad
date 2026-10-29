@@ -1,0 +1,46 @@
+name: Share your setup
+description: Show how you drive your desktop with a controller, so others can copy it.
+title: "[Setup] "
+labels: ["setup"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for sharing. Good setups go into the `setups/` folder of the repo, with credit to you if you tick the box at the bottom.
+  - type: input
+    id: controller
+    attributes:
+      label: Controller
+      placeholder: "For example: Xbox Series X over Bluetooth, 8BitDo Pro 2 (X-input), DualSense Edge"
+    validations:
+      required: true
+  - type: input
+    id: system
+    attributes:
+      label: System
+      placeholder: "For example: Omarchy on Arch, Hyprland 0.56, a TV from the couch"
+    validations:
+      required: true
+  - type: textarea
+    id: config
+    attributes:
+      label: Your setup
+      description: "Your config file (coming soon: ~/.config/hypr-gamepad/config.toml), or the lines you changed in the LAYOUT table. Remove anything private first."
+      render: toml
+    validations:
+      required: true
+  - type: textarea
+    id: why
+    attributes:
+      label: What you use it for, and why this layout
+  - type: textarea
+    id: buttons
+    attributes:
+      label: Anything your controller does differently
+      description: "For example: buttons that came out swapped, or a D-pad that did not answer. Paste what `python3 -m evdev.evtest` showed for them if you can."
+  - type: checkboxes
+    id: credit
+    attributes:
+      label: Credit
+      options:
+        - label: You may add my setup to the repo's setups/ folder and credit my GitHub handle.

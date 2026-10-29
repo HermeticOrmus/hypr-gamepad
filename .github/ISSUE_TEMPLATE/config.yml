@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: Questions, ideas and setups
+    url: https://github.com/HermeticOrmus/hypr-gamepad/discussions
+    about: Ask how to set it up, or show how you drive your desktop.
