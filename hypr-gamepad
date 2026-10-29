@@ -3,8 +3,9 @@
 
 The aim: herdr's agents, voice-to-text dictation, and every window, tab, herdr pane and workspace,
 driven from the controller alone, with the hands off the keyboard. Made for the DualSense; any pad the
-kernel calls a gamepad works ([device] picks one, `status` says how it is read), and the controls
-below go by the DualSense's names.
+kernel calls a gamepad works ([device] picks one, `status` says how it is read). The controls below go
+by the DualSense's names; the map and the notes use the pad's own (A B X Y and LB RB LT RT on an Xbox
+pad, B A Y X and L R ZL ZR on a Nintendo one), and `map --pad FAMILY` shows any family's.
 
     hypr-gamepad run [--dry] [--device PATH]   the daemon; hypr-gamepad.service runs it
     hypr-gamepad status                        the pad, its battery, Hyprland, the config file
@@ -130,7 +131,6 @@ from typing import Any, Callable, Protocol
 
 log = logging.getLogger("hypr-gamepad")
 
-BATTERY = "/sys/class/power_supply/ps-controller-battery-{mac}"
 
 # Kernel input codes (linux/input-event-codes.h). python-evdev is imported only where the pad is
 # opened, so this file loads where evdev is missing (the tests run on machines without it).
@@ -167,6 +167,18 @@ FAMILY_BUTTONS = {
     "xbox": {0x133: "west", 0x134: "north", KEY_RECORD: "capture"},
     "nintendo": {BTN_Z: "capture"},
 }
+# What each family prints on its pads; CONTROL_NAMES (the DualSense's) for the rest.
+FAMILY_NAMES = {
+    "playstation": {},
+    "xbox": {"south": "A", "east": "B", "west": "X", "north": "Y", "l1": "LB", "r1": "RB", "l2": "LT", "r2": "RT",
+             "l3": "LS", "r3": "RS", "select": "View", "start": "Menu", "home": "Xbox", "capture": "Share"},
+    "nintendo": {"south": "B", "east": "A", "west": "Y", "north": "X", "l1": "L", "r1": "R", "l2": "ZL",
+                 "r2": "ZR", "l3": "LS", "r3": "RS", "select": "Minus", "start": "Plus", "home": "Home",
+                 "capture": "Capture"},
+    "generic": {"south": "South", "east": "East", "west": "West", "north": "North", "select": "Select",
+                "start": "Start", "home": "Home"},
+}
+FACE = ("south", "east", "west", "north")
 STICK_ROLES = {"lx": ("left", 0), "ly": ("left", 1), "rx": ("right", 0), "ry": ("right", 1)}
 LAYER_KEY = "l2"  # held: the world layer
 GAME_CHORD = frozenset({"home", "start"})  # together: game mode on / off
@@ -468,6 +480,23 @@ class Profile:
     buttons: dict[int, str] = field(default_factory=lambda: dict(BUTTONS))
     axes: dict[int, Axis] = field(default_factory=dualsense_axes)
     chord: frozenset[str] = GAME_CHORD
+
+    def name_of(self, control: str) -> str:
+        """A control as this pad's family prints it: "A" for south on an Xbox pad, "Cross" on a
+        DualSense (a DualShock 4's select is Share, a DualSense's Create)."""
+        if control == "chord":
+            return self.chord_name()
+        if control == "select" and self.family == "playstation" and (self.vendor, self.product) not in DUALSENSE_IDS:
+            return "Share"
+        return FAMILY_NAMES.get(self.family, {}).get(control) or CONTROL_NAMES[control]
+
+    def chord_name(self) -> str:
+        return " + ".join(self.name_of(control) for control in ("home", "select", "start") if control in self.chord)
+
+    def glyph_of(self, control: str) -> str:
+        """The map's mark: the DualSense's shapes for its face buttons (other pads print a letter, which
+        the name already says), arrows for the D-pad and the sticks."""
+        return "" if control in FACE and self.family != "playstation" else GLYPHS.get(control, "")
 
     def describe(self) -> str:
         """One log line: what the daemon makes of the pad."""
@@ -1695,7 +1724,7 @@ class jump_to:
             return
         window = pad.windows.active()
         if window is None or window.kind != "herdr":
-            pad.fx.notify("Triangle jumps inside herdr")
+            pad.fx.notify(f"{pad.profile.name_of(press.control)} jumps inside herdr")
             return
         for key in chords:
             if not pad.hypr.dispatch(key.expr(window.address)):
@@ -1766,7 +1795,7 @@ def board_label(label: str) -> str:
 def run_ideas(pad: "Pad", press: Press) -> None:
     """Create: [ideas].command; when there is none, a note says so, once."""
     if not CONFIG.ideas.command:
-        pad.note_once("ideas", "Create is not set up", "see [ideas] in the config")
+        pad.note_once("ideas", f"{pad.profile.name_of(press.control)} is not set up", "see [ideas] in the config")
         return
     pad.fx.rumble("tick")
     pad.runner.spawn(list(CONFIG.ideas.command))
@@ -1889,6 +1918,11 @@ LAYOUT: dict[str, dict[str, str]] = {
 LAYER_NAMES = {"base": "Inside the window", "world": "L2 held: the desktop"}
 
 
+def layer_names(profile: Profile) -> dict[str, str]:
+    """LAYER_NAMES with the pad's own name for L2."""
+    return {"base": LAYER_NAMES["base"], "world": f"{profile.name_of(LAYER_KEY)} held: the desktop"}
+
+
 def layout(layer: str) -> dict[str, str]:
     """LAYOUT's side with [layout.<side>]'s changes; a control set to "" does nothing."""
     changes = {CONTROL_ALIASES.get(control, control): action for control, action in getattr(CONFIG.layout, layer).items()}
@@ -1901,7 +1935,7 @@ CONTROL_NAMES = {
     "rs_up": "Right stick up", "rs_down": "Right stick down",
     "south": "Cross", "east": "Circle", "west": "Square", "north": "Triangle",
     "l1": "L1", "r1": "R1", "l2": "L2", "r2": "R2", "l3": "L3", "r3": "R3",
-    "home": "PS", "start": "Options", "select": "Create",
+    "home": "PS", "start": "Options", "select": "Create", "capture": "Capture",
 }
 
 
@@ -2167,7 +2201,7 @@ class Pad:
         if self.mode == "desk":
             self.mode = "game"
             self.fx.rumble("long")
-            self.fx.notify("Game mode", "The pad is the game's. PS + Options brings it back.")
+            self.fx.notify("Game mode", f"The pad is the game's. {self.profile.chord_name()} brings it back.")
         else:
             self.mode = "desk"
             self.fx.rumble("double")
@@ -2575,9 +2609,10 @@ def run_daemon(dry: bool, device: str | None) -> None:
         mic = MicReader(where) if has_mic(dev.info.vendor, dev.info.product) else None
         pad = Pad(hypr, motors, runner=DryRunner() if dry else None, wheel=wheel, mode=mode, lights=lights,
                   profile=profile)
-        way_in = ("Game mode: the pad is the game's. PS + Options brings it back." if mode == "game"
-                  else "Hold L2 for the desktop.")
-        motors.notify("DualSense ready", f"Battery {battery(where)}. {way_in}")
+        way_in = (f"Game mode: the pad is the game's. {profile.chord_name()} brings it back." if mode == "game"
+                  else f"Hold {profile.name_of(LAYER_KEY)} for the desktop.")
+        who = "DualSense" if (profile.vendor, profile.product) in DUALSENSE_IDS else profile.name
+        motors.notify(f"{who} ready", f"Battery {battery(where)}. {way_in}")
         try:
             serve(dev, pad, motors, mic)
         except OSError as exc:
@@ -2600,7 +2635,7 @@ MAP_GROUPS = [
     ("D-pad", ["up", "down", "left", "right"]),
     ("Shoulders", ["l1", "r1", "l2", "r2"]),
     ("Sticks", ["ls_up", "ls_down", "ls_left", "ls_right", "l3", "rstick", "rs_up", "rs_down", "r3"]),
-    ("Middle", ["home", "start", "select", "mic", "chord"]),
+    ("Middle", ["home", "start", "select", "capture", "mic", "chord"]),
 ]
 # The pad's own marks for the face buttons and the D-pad (escapes keep this file ASCII).
 GLYPHS = {"south": "\u2715", "east": "\u25cb", "west": "\u25a1", "north": "\u25b3",
@@ -2619,7 +2654,9 @@ MAP_EXTRA = {
 }
 
 
-def map_rows(layer: str) -> list[dict[str, Any]]:
+def map_rows(layer: str, profile: Profile | None = None) -> list[dict[str, Any]]:
+    """What each control does on one side, in the pad's own names (a DualSense's without a profile)."""
+    profile = profile or Profile()
     rows = []
     bound = layout(layer)
     for group, controls in MAP_GROUPS:
@@ -2635,32 +2672,40 @@ def map_rows(layer: str) -> list[dict[str, Any]]:
                 label, labels, kinds = MAP_EXTRA[layer][control], {}, ["*"]
             else:
                 continue
-            name = MAP_NAMES.get(control) or CONTROL_NAMES[control]
-            rows.append({"control": control, "group": group, "glyph": GLYPHS.get(control, ""), "name": name,
+            name = MAP_NAMES.get(control) or profile.name_of(control)
+            rows.append({"control": control, "group": group, "glyph": profile.glyph_of(control), "name": name,
                          "label": label, "labels": labels, "kinds": kinds})
     return rows
 
 
-def pad_battery() -> str:
-    """The pad's charge for the map, "" when no DualSense is there."""
-    found = sorted(glob.glob(BATTERY.format(mac="*")))
-    for base in found:
-        try:
-            return Path(base, "capacity").read_text().strip() + "%"
-        except OSError:
-            continue
-    return ""
+def map_pad(family: str | None, sysfs: str = "/sys") -> tuple[Profile, str]:
+    """The pad the map is for, and its charge ("80%", "" when unknown): the pad connected, named as its
+    family names its controls; `family` names them as that family does instead. With no pad and no
+    family, the plain names (south, L1, select). Read from sysfs: nothing is opened."""
+    found, charge = None, ""
+    seen = scan(sysfs)
+    chosen = pick_pad([(device.path, device.name, device.gamepad) for device in seen], CONFIG.device.name)
+    for device in seen:
+        if device.path == chosen:
+            found = scan_profile(device)
+            level = battery(os.path.join(sysfs, "class", "input", os.path.basename(device.path), "device"))
+            charge = "" if level == "unknown" else level.split()[0]
+    if family:
+        return Profile(family=family), charge
+    return found or Profile(name="", family="generic", vendor=0, product=0), charge
 
 
-def print_map(as_json: bool) -> None:
-    layers = {layer: map_rows(layer) for layer in LAYOUT}
+def print_map(as_json: bool, profile: Profile | None = None, charge: str = "") -> None:
+    profile = profile or Profile()
+    layers = {layer: map_rows(layer, profile) for layer in LAYOUT}
+    names = layer_names(profile)
     if as_json:
-        print(json.dumps({"layers": layers, "layer_names": LAYER_NAMES, "battery": pad_battery()}, indent=1))
+        print(json.dumps({"layers": layers, "layer_names": names, "battery": charge}, indent=1))
         return
     for layer, rows in layers.items():
         if not rows:
             continue
-        print(LAYER_NAMES[layer])
+        print(names[layer])
         for row in rows:
             print(f"  {row['glyph'] or ' '} {row['name']:<12} {row['label']}")
 
@@ -2750,6 +2795,8 @@ def main(argv: list[str] | None = None) -> int:
                                             "without running it")
     show = sub.add_parser("map", help="what each control does")
     show.add_argument("--json", action="store_true")
+    show.add_argument("--pad", choices=FAMILIES, help="name the controls as this family's pads do "
+                                                      "(default: as the pad connected does)")
     for command in (run, status, check_it, show):
         command.add_argument("--config", metavar="PATH",
                              help=f"the config file (default {default_config_path()}; none there: the defaults)")
@@ -2775,7 +2822,7 @@ def main(argv: list[str] | None = None) -> int:
             log.warning("%s", warning)
 
     if args.cmd == "map":
-        print_map(args.json)
+        print_map(args.json, *map_pad(args.pad))
     elif args.cmd == "status":
         print_status()
         print(f"config: {source}{'' if source.exists() else ' (none: the defaults)'}")

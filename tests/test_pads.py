@@ -483,6 +483,22 @@ class Names(PadCase):
         self.assertNotEqual(proc.returncode, 0)
 
 
+class MapPad(unittest.TestCase):
+    def test_the_map_names_the_pad_connected_and_reads_its_charge_without_opening_it(self):
+        root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, root)
+        self.assertEqual(hg.map_pad(None, str(root))[0].family, "generic")      # no pad: the plain names
+        sysfs_device(root, "event7", "Microsoft X-Box 360 pad", 0x045E, 0x028E, "7fdb000000000000 0 0 0 0",
+                     "3003f", driver="xpad")
+        supply = root / "class" / "input" / "event7" / "device" / "device" / "power_supply" / "xpad_battery"
+        supply.mkdir(parents=True)
+        (supply / "capacity").write_text("40\n")
+        (supply / "status").write_text("Discharging\n")
+        found, charge = hg.map_pad(None, str(root))
+        self.assertEqual((found.family, found.name_of("south"), charge), ("xbox", "A", "40%"))
+        self.assertEqual(hg.map_pad("nintendo", str(root))[0].name_of("south"), "B")
+
+
 class ReadyNote(unittest.TestCase):
     def note(self, found: "hg.Profile", mode: str = "desk") -> str:
         notes = []

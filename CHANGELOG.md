@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The map and the notes name each control as the pad in the hand does: A B X Y, LB RB LT RT, View Menu Xbox on an Xbox pad; B A Y X, L R ZL ZR, Minus Plus Home on a Nintendo pad; South East West North on a plain pad. `map --pad FAMILY` shows a family's names.
 - The pad is found from sysfs and is the one device opened: 7 ms instead of about 700 ms on a desk with 43 input devices, each second while the pad sleeps.
 - Any gamepad: the first one the kernel calls a gamepad is the pad (`[device] name` picks another). Sticks and triggers scale from each pad's own range; triggers without buttons (Xbox) are read from their axes; the D-pad may be a hat or four buttons (older Switch Pro kernels); an Xbox pad's X and Y land west and north; game mode is home + start, or select + start on a pad without home. `status` says how it reads the pad.
 - The mic button is read only on a DualSense, the lights are the LED files the pad has, and the battery is the pad's own power supply (any HID driver), ready for other pads.

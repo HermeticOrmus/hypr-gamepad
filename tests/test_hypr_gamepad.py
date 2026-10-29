@@ -275,7 +275,7 @@ class Layout(unittest.TestCase):
                 self.assertNotEqual(control, sp.LAYER_KEY)
 
     def test_map_json_lists_every_control_with_its_label(self):
-        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--json", "--config", str(SETUP)], capture_output=True, text=True, timeout=10)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--json", "--pad", "playstation", "--config", str(SETUP)], capture_output=True, text=True, timeout=10)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         doc = json.loads(proc.stdout)
         world = {row["control"]: row for row in doc["layers"]["world"]}
@@ -1266,7 +1266,7 @@ class MapRows(unittest.TestCase):
         self.assertEqual(sticks, ["ls_up", "ls_down", "ls_left", "ls_right", "l3", "rstick", "r3"])
 
     def test_map_json_has_both_sides_and_the_battery(self):
-        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--json", "--config", str(SETUP)], capture_output=True, text=True, timeout=10)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--json", "--pad", "playstation", "--config", str(SETUP)], capture_output=True, text=True, timeout=10)
         doc = json.loads(proc.stdout)
         self.assertEqual(set(doc["layers"]), {"base", "world"})
         self.assertIn("battery", doc)
