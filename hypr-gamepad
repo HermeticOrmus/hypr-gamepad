@@ -2075,17 +2075,18 @@ def make_wheel(dry: bool) -> Wheel:
 
 class SysfsLights(Lights):
     """The pad's LED class files (hid-playstation): <input>:rgb:indicator and <input>:white:player-N.
-    Writable with the udev rule; without it the first write fails, is logged once, and the lights stay
-    as the kernel set them."""
+    Only the ones the pad has are written: a DualShock 4 has the lightbar and no player lights, most
+    other pads neither. Writable with the udev rule; without it the first write fails, is logged once,
+    and the lights stay as the kernel set them."""
 
-    def __init__(self, input_dir: str):
+    def __init__(self, input_dir: str, leds: str = "/sys/class/leds"):
         name = Path(input_dir).name  # inputNNN, the pad's input device
-        self.rgb = Path("/sys/class/leds", f"{name}:rgb:indicator")
-        self.player = [Path("/sys/class/leds", f"{name}:white:player-{n}") for n in range(1, 6)]
+        self.rgb = Path(leds, f"{name}:rgb:indicator")
+        self.player = [Path(leds, f"{name}:white:player-{n}") for n in range(1, 6)]
         self.broken = False
 
     def write(self, path: Path, value: str) -> None:
-        if self.broken:
+        if self.broken or not path.parent.is_dir():  # an LED the pad does not have
             return
         try:
             path.write_text(value)
@@ -2178,14 +2179,29 @@ def find_pad(path: str | None = None) -> Any:
     return None
 
 
-def battery(mac: str) -> str:
-    base = BATTERY.format(mac=mac.lower())
-    try:
-        level = Path(base, "capacity").read_text().strip()
-        state = Path(base, "status").read_text().strip()
-    except OSError:
-        return "unknown"
-    return f"{level}% {state.lower()}"
+# A DualSense (0CE6) and a DualSense Edge (0DF2): the pads with the mic button, in the reports
+# mic_down reads (the udev rule names the same two).
+DUALSENSE_IDS = {(0x054C, 0x0CE6), (0x054C, 0x0DF2)}
+
+
+def has_mic(vendor: int, product: int) -> bool:
+    """Only a DualSense's reports carry the mic button where mic_down reads it: a DualShock 4's USB
+    report has its timestamp there, which would talk at random."""
+    return (vendor, product) in DUALSENSE_IDS
+
+
+def battery(where: str) -> str:
+    """The pad's charge, "80% discharging", from the power supply its HID driver hangs on the pad
+    (<input>/device/power_supply/: hid-playstation's ps-controller-battery-<mac>, hid-nintendo's, a
+    generic HID pad's); "unknown" when it has none."""
+    for supply in sorted(Path(where, "device", "power_supply").glob("*")):
+        try:
+            level = Path(supply, "capacity").read_text().strip()
+            state = Path(supply, "status").read_text().strip()
+        except OSError:
+            continue
+        return f"{level}% {state.lower()}"
+    return "unknown"
 
 
 def input_dir(dev: Any) -> str:
@@ -2301,18 +2317,19 @@ def run_daemon(dry: bool, device: str | None) -> None:
         motors = Motors(dev, dry=dry)
         where = input_dir(dev)
         lights: Lights = DryLights() if dry else SysfsLights(where)
-        mic = MicReader(where)
+        mic = MicReader(where) if has_mic(dev.info.vendor, dev.info.product) else None
         pad = Pad(hypr, motors, runner=DryRunner() if dry else None, wheel=wheel, mode=mode, lights=lights)
         way_in = ("Game mode: the pad is the game's. PS + Options brings it back." if mode == "game"
                   else "Hold L2 for the desktop.")
-        motors.notify("DualSense ready", f"Battery {battery(dev.uniq or '')}. {way_in}")
+        motors.notify("DualSense ready", f"Battery {battery(where)}. {way_in}")
         try:
             serve(dev, pad, motors, mic)
         except OSError as exc:
             log.info("pad gone: %s", exc)
         finally:
             pad.reset()
-            mic.close()
+            if mic is not None:
+                mic.close()
             mode = pad.mode
             try:
                 dev.close()
@@ -2441,14 +2458,20 @@ def print_status() -> None:
         if dev is None:
             print("pad: not connected")
         else:
-            print(f"pad: {dev.name} at {dev.path}, battery {battery(dev.uniq or '')}")
             where = input_dir(dev)
+            print(f"pad: {dev.name} at {dev.path}, battery {battery(where)}")
             rgb = SysfsLights(where).rgb / "multi_intensity"
-            print(f"lights: {'writable' if os.access(rgb, os.W_OK) else 'not writable (install the udev rule)'}")
-            nodes = sorted(Path(where, "device").glob("hidraw/hidraw*"))
-            node = f"/dev/{nodes[0].name}" if nodes else "none"
-            readable = bool(nodes) and os.access(node, os.R_OK)
-            print(f"mic button: {node} {'readable' if readable else 'not readable (install the udev rule)'}")
+            if not rgb.exists():
+                print("lights: none on this pad")
+            else:
+                print(f"lights: {'writable' if os.access(rgb, os.W_OK) else 'not writable (install the udev rule)'}")
+            if not has_mic(dev.info.vendor, dev.info.product):
+                print("mic button: none on this pad")
+            else:
+                nodes = sorted(Path(where, "device").glob("hidraw/hidraw*"))
+                node = f"/dev/{nodes[0].name}" if nodes else "none"
+                readable = bool(nodes) and os.access(node, os.R_OK)
+                print(f"mic button: {node} {'readable' if readable else 'not readable (install the udev rule)'}")
             dev.close()
     hypr = Hypr()
     active = hypr.json("activewindow")
