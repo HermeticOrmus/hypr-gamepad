@@ -1,0 +1,45 @@
+# hermeticormus-dualsense: the setup hypr-gamepad was built on, as it runs every day.
+# Copy to ~/.config/hypr-gamepad/config.toml. The board, the wheel, the jump list and the ideas
+# listener are this desk's own tools: drop those sections on a desk without them.
+
+[talk]                          # R2 and the mic button: voice-flow, as Super+H
+backend = "voice-flow"
+toggle = ["voice-flow"]
+
+[jump]                          # Triangle: the agent that waits most, from the board's own triage
+backend = "command"
+items = ["sun-wheel", "items"]
+go = ["sun-wheel", "jump", "{key}", "--notify"]
+
+[board]                         # PS tap: raise the Sun board (its key is Super+Ctrl+Shift+Return)
+command = ["omarchy-launch-or-focus-webapp", "Sun board", "http://127.0.0.1:7741/"]
+label = "Tap: the Sun board"
+
+[wheel]                         # PS held: the sessions wheel shell plugin
+plugin = "ormus.sessions-wheel"
+
+[ideas]                         # Create: the voice ideas listener, as Super+Shift+H
+command = ["voice-ideas-toggle"]
+
+[windows]
+herdr_class_prefixes = ["org.ormus.workboard."]  # a workboard: a herdr client on another machine
+herdr_programs = ["herdr-theme"]                  # herdr's themed launcher, local or over ssh
+board_titles = ["Sun board"]
+
+[herdr]                         # this desk's herdr: prefix-free alt chords, ~/.config/herdr/config.toml
+prefix = "ctrl+space"
+
+[herdr.keys]
+tab_prev = "alt+left"
+tab_next = "alt+right"
+agent_prev = "alt+shift+up"
+agent_next = "alt+shift+down"
+space_prev = "alt+up"
+space_next = "alt+down"
+zoom = "prefix+z"
+
+[herdr.labels]                  # here the left stick walks agents and spaces, not panes
+agent_prev = "Previous agent"
+agent_next = "Next agent"
+space_prev = "Previous herdr space"
+space_next = "Next herdr space"

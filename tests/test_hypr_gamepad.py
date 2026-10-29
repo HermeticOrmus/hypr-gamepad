@@ -29,6 +29,10 @@ loader = importlib.machinery.SourceFileLoader("hypr_gamepad", str(SCRIPT))
 sp = importlib.util.module_from_spec(importlib.util.spec_from_loader("hypr_gamepad", loader))
 sys.modules["hypr_gamepad"] = sp  # dataclasses look their module up while the file loads
 loader.exec_module(sp)
+# The setup the pad was built on: every test below runs against it, so passing they prove that this
+# config file reproduces what the pad did before there was a config file.
+SETUP = ROOT / "setups/hermeticormus-dualsense/config.toml"
+sp.CONFIG = sp.load_config(SETUP)
 
 EV_KEY, EV_ABS = 0x01, 0x03
 CROSS, CIRCLE, TRIANGLE, SQUARE = 0x130, 0x131, 0x133, 0x134
@@ -271,7 +275,7 @@ class Layout(unittest.TestCase):
                 self.assertNotEqual(control, sp.LAYER_KEY)
 
     def test_map_json_lists_every_control_with_its_label(self):
-        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--json"], capture_output=True, text=True, timeout=10)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--json", "--config", str(SETUP)], capture_output=True, text=True, timeout=10)
         self.assertEqual(proc.returncode, 0, proc.stderr)
         doc = json.loads(proc.stdout)
         world = {row["control"]: row for row in doc["layers"]["world"]}
@@ -914,7 +918,7 @@ class JumpTriangle(JumpCase):
         for text, code in (("", 1), ("not json", 0), ('{"no": "items"}', 0)):
             self.tap(TRIANGLE)
             self.answer(text, code)
-            self.assertEqual(self.fx.notes[-1], "Agents: The Sun board does not answer")
+            self.assertEqual(self.fx.notes[-1], "Agents: sun-wheel does not answer")
             self.clock.now += sp.JUMP_CYCLE_S + 1
         self.assertEqual(self.jumps(), [])
 
@@ -1262,7 +1266,7 @@ class MapRows(unittest.TestCase):
         self.assertEqual(sticks, ["ls_up", "ls_down", "ls_left", "ls_right", "l3", "rstick", "r3"])
 
     def test_map_json_has_both_sides_and_the_battery(self):
-        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--json"], capture_output=True, text=True, timeout=10)
+        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--json", "--config", str(SETUP)], capture_output=True, text=True, timeout=10)
         doc = json.loads(proc.stdout)
         self.assertEqual(set(doc["layers"]), {"base", "world"})
         self.assertIn("battery", doc)
