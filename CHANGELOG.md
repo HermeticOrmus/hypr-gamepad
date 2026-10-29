@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Controls are named by where they sit (south, east, west, north; select, start, home), so a config reads the same for any controller. The DualSense names (cross, circle, square, triangle, create, options, ps) still work in a config; `map --json` lists the place names.
+
 ## 0.1.0: first public version
 
 - A PS5 DualSense drives Hyprland 0.56+ (Lua config): windows, workspaces, screens, herdr, dictation, an on-screen map, game mode, lightbar.

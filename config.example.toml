@@ -72,15 +72,17 @@
 # jump = "Go to herdr's latest notification"
 
 # The layout: a control to an action, per side; "" unbinds it; only the controls listed change.
-# Controls (as `hypr-gamepad map --json` names them): cross circle square triangle up down left right
-# l1 r1 r2 l3 r3 ls_up ls_down ls_left ls_right ps options create mic, and on the desktop side also
-# rs_up rs_down (inside the window the right stick scrolls). L2 is the side itself.
+# Controls (as `hypr-gamepad map --json` names them) go by where they sit on the pad, for any
+# controller: the face buttons south east west north (a DualSense's Cross Circle Square Triangle;
+# those names work here too), up down left right (the D-pad), l1 r1 r2 l3 r3, ls_up ls_down ls_left
+# ls_right (left stick flicks), select start home (Create Options PS), mic, and on the desktop side
+# also rs_up rs_down (inside the window the right stick scrolls). L2 is the side itself.
 # Actions: enter escape mode take_back arrow_up arrow_down arrow_left arrow_right tab_prev tab_next
 # agent_prev agent_next space_prev space_next zoom size_up size_down size_normal talk talk_toggle
 # ideas jump board map focus_left focus_right focus_up focus_down workspace_prev workspace_next
 # screen_left screen_right screen_up screen_down fullscreen workspace_back window_next scratchpad.
-# For example, Triangle zooms the herdr pane and Square does nothing:
-#   triangle = "zoom"
-#   square = ""
+# For example, the north button (Triangle) zooms the herdr pane and the west one (Square) does nothing:
+#   north = "zoom"
+#   west = ""
 # [layout.base]                   # inside the window
 # [layout.world]                  # L2 held: the desktop
