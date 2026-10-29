@@ -279,7 +279,7 @@ class Layout(unittest.TestCase):
         self.assertEqual(proc.returncode, 0, proc.stderr)
         doc = json.loads(proc.stdout)
         world = {row["control"]: row for row in doc["layers"]["world"]}
-        self.assertEqual(world["cross"]["label"], "Full screen on / off")
+        self.assertEqual(world["south"]["label"], "Full screen on / off")
         self.assertEqual((world["ls_left"]["glyph"], world["ls_left"]["name"]), ("\u2190", "Left stick"))
         self.assertEqual(len(world), len(sp.LAYOUT["world"]) + len(sp.MAP_EXTRA["world"]))  # + L2, right stick
 
@@ -1245,13 +1245,13 @@ class MapRows(unittest.TestCase):
     def test_rows_follow_the_pad_and_carry_what_the_overlay_needs(self):
         rows = sp.map_rows("base")
         self.assertEqual([r["group"] for r in rows][:4], ["Buttons"] * 4)
-        self.assertEqual([r["control"] for r in rows][:5], ["cross", "circle", "square", "triangle", "up"])
+        self.assertEqual([r["control"] for r in rows][:5], ["south", "east", "west", "north", "up"])
         by = {r["control"]: r for r in rows}
-        self.assertEqual((by["cross"]["glyph"], by["cross"]["name"]), ("✕", "Cross"))
+        self.assertEqual((by["south"]["glyph"], by["south"]["name"]), ("✕", "Cross"))
         self.assertEqual((by["ls_left"]["glyph"], by["ls_left"]["name"]), ("←", "Left stick"))
         self.assertEqual(by["ls_left"]["labels"]["browser"], "Back")
         self.assertEqual(by["ls_up"]["kinds"], ["board", "herdr"])
-        self.assertEqual(by["cross"]["kinds"], ["*"])
+        self.assertEqual(by["south"]["kinds"], ["*"])
         self.assertEqual(by["rstick"]["label"], "Scroll; the further, the faster")
         self.assertEqual(by["l2"]["label"], "Hold: the desktop side")
         for r in rows:

@@ -177,14 +177,14 @@ class Defaults(ConfigCase):
         """prefix+o: herdr's latest notification, the agent that called last."""
         self.use()
         self.hypr.active = HERDR
-        self.tap("triangle")
+        self.tap("north")
         self.assertEqual(self.sent(), [shortcut("CTRL", "b", "0xa1"), shortcut("", "o", "0xa1")])
         self.assertEqual(self.runner.calls, [])
 
     def test_triangle_outside_herdr_says_where_it_works(self):
         self.use()
         self.hypr.active = BROWSER
-        self.tap("triangle")
+        self.tap("north")
         self.assertEqual(self.sent(), [])
         self.assertEqual(self.fx.notes, ["Triangle jumps inside herdr"])
 
@@ -196,17 +196,17 @@ class Defaults(ConfigCase):
 
     def test_board_wheel_and_ideas_are_off_and_say_so(self):
         self.use()
-        self.tap("ps")                               # no board
-        self.hold("ps", 0.6)                         # no wheel
-        self.pad.release("ps")
+        self.tap("home")                             # no board
+        self.hold("home", 0.6)                       # no wheel
+        self.pad.release("home")
         self.assertEqual(self.sent(), [])
-        self.tap("create")
-        self.tap("create")
+        self.tap("select")
+        self.tap("select")
         self.assertEqual(self.runner.calls, [])
         self.assertEqual(self.fx.notes, ["Create is not set up: see [ideas] in the config"])  # once
         for layer in ("base", "world"):
-            self.assertNotIn("ps", self.rows(layer))
-            self.assertNotIn("create", self.rows(layer))
+            self.assertNotIn("home", self.rows(layer))
+            self.assertNotIn("select", self.rows(layer))
 
     def test_talk_none_says_so_once(self):
         self.use('[talk]\nbackend = "none"\n')
@@ -331,19 +331,19 @@ class Problems(ConfigCase):
 class Layout(ConfigCase):
     def test_the_layout_changes_single_controls(self):
         self.use('[layout.base]\ntriangle = "zoom"\nsquare = ""\n\n[layout.world]\ncross = "scratchpad"\n')
-        self.assertEqual(hg.layout("base")["triangle"], "zoom")
-        self.assertNotIn("square", hg.layout("base"))
-        self.assertEqual(hg.layout("base")["cross"], "enter")      # the rest stay as they were
+        self.assertEqual(hg.layout("base")["north"], "zoom")
+        self.assertNotIn("west", hg.layout("base"))
+        self.assertEqual(hg.layout("base")["south"], "enter")      # the rest stay as they were
         self.hypr.active = HERDR
-        self.tap("triangle")
+        self.tap("north")
         self.assertEqual(self.sent(), [shortcut("CTRL", "b", "0xa1"), shortcut("", "z", "0xa1")])
-        self.tap("square")
+        self.tap("west")
         self.assertEqual(self.sent(), [])
         self.pad.press("l2")
-        self.tap("cross")
+        self.tap("south")
         self.assertEqual(self.sent(), ['hl.dsp.workspace.toggle_special("scratchpad")'])
-        self.assertEqual(self.rows()["triangle"]["labels"]["herdr"], "Zoom the herdr pane")
-        self.assertNotIn("square", self.rows())
+        self.assertEqual(self.rows()["north"]["labels"]["herdr"], "Zoom the herdr pane")
+        self.assertNotIn("west", self.rows())
 
 
 class PlaceNames(ConfigCase):
@@ -361,7 +361,7 @@ class PlaceNames(ConfigCase):
         self.assertEqual([r["control"] for r in hg.map_rows("base")][:4], ["south", "east", "west", "north"])
 
     def test_the_map_still_shows_the_dualsense_names(self):
-        self.use()
+        self.use('[board]\ncommand = ["board"]\n\n[ideas]\ncommand = ["ideas"]\n')
         rows = self.rows()
         self.assertEqual([(rows[c]["glyph"], rows[c]["name"]) for c in ("south", "east", "west", "north")],
                          [("✕", "Cross"), ("○", "Circle"), ("□", "Square"), ("△", "Triangle")])
@@ -429,7 +429,7 @@ class CommandTalk(ConfigCase):
         self.hypr.active = HERDR
         self.pad.press("r2")
         self.clock.now += 1.0
-        self.tap("circle")
+        self.tap("east")
         self.pad.release("r2")
         self.assertEqual(self.runner.calls, [START, CANCEL])
         self.assertEqual(self.sent(), [])
@@ -458,15 +458,15 @@ class CommandTalk(ConfigCase):
 class Integrations(ConfigCase):
     def test_the_board_command_is_quoted_for_the_shell_inside_lua(self):
         self.use('[board]\ncommand = ["open-board", "it\'s here", "a]]b"]\n')
-        self.tap("ps")
+        self.tap("home")
         self.assertEqual(self.sent(), ["hl.dsp.exec_cmd([=[open-board 'it'\"'\"'s here' 'a]]b']=])"])
-        self.assertEqual(self.rows()["ps"]["label"], "Tap: the board")
+        self.assertEqual(self.rows()["home"]["label"], "Tap: the board")
 
     def test_the_jump_command_gets_the_key_appended_or_where_key_stands(self):
         for go, want in (('["agents", "show"]', ["agents", "show", "k1"]),
                          ('["agents", "show", "{key}", "--quiet"]', ["agents", "show", "k1", "--quiet"])):
             self.use(f'[jump]\nbackend = "command"\nitems = ["agents", "list"]\ngo = {go}\n')
-            self.tap("triangle")
+            self.tap("north")
             self.assertEqual(self.runner.calls, [["agents", "list"]])
             proc = self.runner.procs[-1]
             Path(proc.out).write_text(json.dumps({"items": [{"key": "k1", "name": "one"}]}))
@@ -476,11 +476,11 @@ class Integrations(ConfigCase):
 
     def test_the_wheel_plugin_names_its_events(self):
         self.use('[wheel]\nplugin = "my.wheel"\n')
-        self.hold("ps", 0.5)
+        self.hold("home", 0.5)
         self.assertTrue(self.sent()[0].startswith('hl.dsp.event("my.wheel padhold pad'))
-        self.pad.release("ps")
+        self.pad.release("home")
         self.assertTrue(self.sent()[-1].startswith('hl.dsp.event("my.wheel release pad'))
-        self.assertEqual(self.rows()["ps"]["label"], "Hold: the sessions wheel (right stick aims, let go jumps)")
+        self.assertEqual(self.rows()["home"]["label"], "Hold: the sessions wheel (right stick aims, let go jumps)")
 
     def test_windows_lists_add_to_the_built_in_ones(self):
         self.use('[windows]\nherdr_classes = ["my.herdr"]\nherdr_class_prefixes = ["my.remote."]\n'
@@ -517,9 +517,9 @@ class MapCommand(ConfigCase):
         rows = {r["control"]: r for r in json.loads(proc.stdout)["layers"]["base"]}
         self.assertEqual(rows["ls_up"]["labels"]["herdr"], "Up one pane")
         self.assertEqual(rows["ls_down"]["labels"]["herdr"], "Pane below")
-        self.assertEqual(rows["ps"]["label"],
+        self.assertEqual(rows["home"]["label"],
                          "Tap: the ops board. Hold: the sessions wheel (right stick aims, let go jumps)")
-        self.assertEqual(rows["triangle"]["kinds"], ["herdr"])
+        self.assertEqual(rows["north"]["kinds"], ["herdr"])
 
     def test_map_works_without_a_config(self):
         env = dict(os.environ, XDG_CONFIG_HOME=str(self.tmp / "empty"))
@@ -529,7 +529,7 @@ class MapCommand(ConfigCase):
         self.assertEqual([rows[c]["labels"]["herdr"] for c in ("ls_up", "ls_down", "ls_left", "ls_right", "l1", "r1")],
                          ["Pane above", "Pane below", "Pane to the left", "Pane to the right",
                           "Previous herdr tab", "Next herdr tab"])
-        self.assertNotIn("ps", rows)
+        self.assertNotIn("home", rows)
         text = self.run_map(env=env)
         self.assertEqual(text.returncode, 0, text.stderr)
         self.assertIn("Inside the window", text.stdout)
@@ -558,6 +558,8 @@ class Example(unittest.TestCase):
         text = (ROOT / "config.example.toml").read_text()
         for name in hg.ACTIONS:
             self.assertRegex(text, rf"(?<![a-z_]){name}(?![a-z_])", "the example's list of actions")
+        for control in hg.bindable("world"):
+            self.assertRegex(text, rf"(?<![a-z_]){control}(?![a-z_])", "the example's list of controls")
 
 
 if __name__ == "__main__":

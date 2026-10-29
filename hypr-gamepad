@@ -93,7 +93,9 @@ L2 held is the world layer, the desktop:
 
 The layout ([layout.base], [layout.world]) sets any one control to any action by name (`map --json`
 names the controls, ACTIONS the actions; zoom, herdr's pane zoom, is bound to none by default); ""
-unbinds it. Only the controls listed change.
+unbinds it. Only the controls listed change. A control is named by where it sits on the pad, as the
+kernel's gamepad spec does: the face buttons south, east, west, north (Cross, Circle, Square,
+Triangle), the middle ones select, start, home (Create, Options, PS); the DualSense's names work too.
 
 The daemon grabs the pad, so no other program reads it while it runs; game mode (PS + Options)
 gives it to a game. Each press becomes one action from the layout, sent to Hyprland over its request
@@ -134,15 +136,22 @@ EV_SYN, EV_KEY, EV_ABS = 0x00, 0x01, 0x03
 SYN_REPORT, SYN_DROPPED = 0, 3
 ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_HAT0X, ABS_HAT0Y = 0x00, 0x01, 0x03, 0x04, 0x10, 0x11
 AXES = (ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_HAT0X, ABS_HAT0Y)
-# hid-playstation's button codes, by the names printed on the pad.
+# The buttons by where they sit on the pad, as the kernel's gamepad spec names their codes
+# (Documentation/input/gamepad.rst): the face buttons south, east, west, north, whatever is printed on
+# them (on a DualSense: Cross, Circle, Square, Triangle); select, start and home in the middle
+# (Create, Options, PS).
 BUTTONS = {
-    0x130: "cross", 0x131: "circle", 0x133: "triangle", 0x134: "square",
+    0x130: "south", 0x131: "east", 0x133: "north", 0x134: "west",
     0x136: "l1", 0x137: "r1", 0x138: "l2", 0x139: "r2",
-    0x13A: "create", 0x13B: "options", 0x13C: "ps", 0x13D: "l3", 0x13E: "r3",
+    0x13A: "select", 0x13B: "start", 0x13C: "home", 0x13D: "l3", 0x13E: "r3",
 }
+# A config may name a control as the DualSense does; never by a letter, as A sits south on an Xbox pad
+# and east on a Nintendo one.
+CONTROL_ALIASES = {"cross": "south", "circle": "east", "square": "west", "triangle": "north",
+                   "create": "select", "options": "start", "ps": "home"}
 STICKS = {ABS_X: ("left", 0), ABS_Y: ("left", 1), ABS_RX: ("right", 0), ABS_RY: ("right", 1)}
 LAYER_KEY = "l2"  # held: the world layer
-GAME_CHORD = {"ps", "options"}  # together: game mode on / off
+GAME_CHORD = {"home", "start"}  # together: game mode on / off
 
 # A stick flick engages past FLICK_ON and lets go under FLICK_OFF (of full tilt), so a stick that
 # rests near the edge does not chatter.
@@ -366,10 +375,15 @@ def validate(config: Config) -> None:
         except ValueError as exc:
             raise ConfigError(f"herdr.keys.{key.name}: {exc}") from None
     for layer in ("base", "world"):
+        named: dict[str, str] = {}  # control -> the name the file gave it
         for control, action in getattr(config.layout, layer).items():
             name = f"layout.{layer}.{control}"
-            if control not in bindable(layer):
+            place = CONTROL_ALIASES.get(control, control)
+            if place not in bindable(layer):
                 raise ConfigError(f"{name}: no such control here (`hypr-gamepad map --json` names them)")
+            if place in named:
+                raise ConfigError(f"layout.{layer}: {named[place]} and {control} are the same control")
+            named[place] = control
             if action and action not in ACTIONS:
                 raise ConfigError(f"{name}: {action!r} is not an action")
 
@@ -1639,11 +1653,11 @@ ACTIONS: dict[str, Action] = {
 # (the world layer's; inside the window the right stick scrolls). L2 itself switches the layer.
 LAYOUT: dict[str, dict[str, str]] = {
     "base": {
-        "cross": "enter", "circle": "escape", "square": "take_back", "l3": "mode",
+        "south": "enter", "east": "escape", "west": "take_back", "l3": "mode",
         "up": "arrow_up", "down": "arrow_down", "left": "arrow_left", "right": "arrow_right",
         "l1": "tab_prev", "r1": "tab_next",
         "ls_up": "agent_prev", "ls_down": "agent_next", "ls_left": "space_prev", "ls_right": "space_next",
-        "r3": "size_normal", "r2": "talk", "create": "ideas", "triangle": "jump", "ps": "board", "options": "map",
+        "r3": "size_normal", "r2": "talk", "select": "ideas", "north": "jump", "home": "board", "start": "map",
         "mic": "talk_toggle",
     },
     "world": {
@@ -1651,8 +1665,8 @@ LAYOUT: dict[str, dict[str, str]] = {
         "l1": "workspace_prev", "r1": "workspace_next",
         "ls_up": "screen_up", "ls_down": "screen_down", "ls_left": "screen_left", "ls_right": "screen_right",
         "rs_up": "size_up", "rs_down": "size_down", "r3": "size_normal",
-        "cross": "fullscreen", "circle": "workspace_back", "square": "window_next", "triangle": "scratchpad",
-        "r2": "talk", "create": "ideas", "ps": "board", "options": "map", "mic": "talk_toggle",
+        "south": "fullscreen", "east": "workspace_back", "west": "window_next", "north": "scratchpad",
+        "r2": "talk", "select": "ideas", "home": "board", "start": "map", "mic": "talk_toggle",
     },
 }
 LAYER_NAMES = {"base": "Inside the window", "world": "L2 held: the desktop"}
@@ -1660,16 +1674,17 @@ LAYER_NAMES = {"base": "Inside the window", "world": "L2 held: the desktop"}
 
 def layout(layer: str) -> dict[str, str]:
     """LAYOUT's side with [layout.<side>]'s changes; a control set to "" does nothing."""
-    merged = {**LAYOUT[layer], **getattr(CONFIG.layout, layer)}
+    changes = {CONTROL_ALIASES.get(control, control): action for control, action in getattr(CONFIG.layout, layer).items()}
+    merged = {**LAYOUT[layer], **changes}
     return {control: action for control, action in merged.items() if action}
 CONTROL_NAMES = {
     "rstick": "Right stick", "chord": "PS + Options", "mic": "Mic button",
     "up": "D-pad up", "down": "D-pad down", "left": "D-pad left", "right": "D-pad right",
     "ls_up": "Left stick up", "ls_down": "Left stick down", "ls_left": "Left stick left", "ls_right": "Left stick right",
     "rs_up": "Right stick up", "rs_down": "Right stick down",
-    "cross": "Cross", "circle": "Circle", "square": "Square", "triangle": "Triangle",
+    "south": "Cross", "east": "Circle", "west": "Square", "north": "Triangle",
     "l1": "L1", "r1": "R1", "l2": "L2", "r2": "R2", "l3": "L3", "r3": "R3",
-    "ps": "PS", "options": "Options", "create": "Create",
+    "home": "PS", "start": "Options", "select": "Create",
 }
 
 
@@ -1818,8 +1833,8 @@ class Pad:
             self.scroll.pause()
             self.rflicked = flick(*self.stick["right"], None)
             return
-        if control == "circle" and (self.talk.drop() or self.sessions.cancel()):
-            return  # Circle while talking drops the recording, with the wheel open closes it; not Esc
+        if control == "east" and (self.talk.drop() or self.sessions.cancel()):
+            return  # Circle (east) while talking drops the recording, with the wheel open closes it; not Esc
         layer = "world" if self.world else "base"
         name = layout(layer).get(control)
         if name is None:
@@ -2308,14 +2323,14 @@ def run_daemon(dry: bool, device: str | None) -> None:
 
 # The map's order, by where a control sits on the pad.
 MAP_GROUPS = [
-    ("Buttons", ["cross", "circle", "square", "triangle"]),
+    ("Buttons", ["south", "east", "west", "north"]),
     ("D-pad", ["up", "down", "left", "right"]),
     ("Shoulders", ["l1", "r1", "l2", "r2"]),
     ("Sticks", ["ls_up", "ls_down", "ls_left", "ls_right", "l3", "rstick", "rs_up", "rs_down", "r3"]),
-    ("Middle", ["ps", "options", "create", "mic", "chord"]),
+    ("Middle", ["home", "start", "select", "mic", "chord"]),
 ]
 # The pad's own marks for the face buttons and the D-pad (escapes keep this file ASCII).
-GLYPHS = {"cross": "\u2715", "circle": "\u25cb", "square": "\u25a1", "triangle": "\u25b3",
+GLYPHS = {"south": "\u2715", "east": "\u25cb", "west": "\u25a1", "north": "\u25b3",
           "up": "\u2191", "down": "\u2193", "left": "\u2190", "right": "\u2192",
           "ls_up": "\u2191", "ls_down": "\u2193", "ls_left": "\u2190", "ls_right": "\u2192",
           "rs_up": "\u2191", "rs_down": "\u2193"}
