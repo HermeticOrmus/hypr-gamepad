@@ -346,6 +346,47 @@ class Layout(ConfigCase):
         self.assertNotIn("square", self.rows())
 
 
+class PlaceNames(ConfigCase):
+    """Controls are named by where they sit on the pad (the kernel's gamepad spec), so one config
+    reads the same for any controller; the PlayStation names still work in a config file."""
+
+    def test_controls_are_named_by_place(self):
+        self.use()
+        base = hg.layout("base")
+        self.assertEqual([base[c] for c in ("south", "east", "west", "north")],
+                         ["enter", "escape", "take_back", "jump"])
+        self.assertEqual([base[c] for c in ("select", "start", "home")], ["ideas", "map", "board"])
+        for gone in ("cross", "circle", "square", "triangle", "create", "options", "ps"):
+            self.assertNotIn(gone, hg.CONTROL_NAMES)
+        self.assertEqual([r["control"] for r in hg.map_rows("base")][:4], ["south", "east", "west", "north"])
+
+    def test_the_map_still_shows_the_dualsense_names(self):
+        self.use()
+        rows = self.rows()
+        self.assertEqual([(rows[c]["glyph"], rows[c]["name"]) for c in ("south", "east", "west", "north")],
+                         [("✕", "Cross"), ("○", "Circle"), ("□", "Square"), ("△", "Triangle")])
+        self.assertEqual([rows[c]["name"] for c in ("select", "start", "home")], ["Create", "Options", "PS"])
+
+    def test_playstation_names_work_in_a_config(self):
+        self.use('[layout.base]\ntriangle = "zoom"\nsquare = ""\n\n[layout.world]\nps = "scratchpad"\n')
+        self.assertEqual(hg.layout("base")["north"], "zoom")
+        self.assertNotIn("west", hg.layout("base"))
+        self.assertEqual(hg.layout("world")["home"], "scratchpad")
+        self.assertEqual(hg.layout("base")["south"], "enter")
+
+    def test_place_names_work_in_a_config(self):
+        self.use('[layout.base]\nnorth = "zoom"\nwest = ""\n')
+        self.assertEqual(hg.layout("base")["north"], "zoom")
+        self.assertNotIn("west", hg.layout("base"))
+
+    def test_one_control_named_twice_is_an_error(self):
+        with self.assertRaises(hg.ConfigError) as caught:
+            hg.load_config(self.write('[layout.base]\ntriangle = "zoom"\nnorth = "map"\n'))
+        self.assertIn("layout.base", str(caught.exception))
+        self.assertIn("triangle", str(caught.exception))
+        self.assertIn("north", str(caught.exception))
+
+
 COMMAND_TALK = """
 [talk]
 backend = "command"
