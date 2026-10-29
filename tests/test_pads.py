@@ -183,6 +183,100 @@ class Finding(unittest.TestCase):
         self.assertEqual(hg.driver_of("/dev/input/event300", str(sysfs)), "")
 
 
+def sysfs_device(root: Path, event: str, name: str, vendor: int, product: int, key: str, abs_: str,
+                 driver: str = "") -> None:
+    """One input device as /sys/class/input/<event>/device shows it."""
+    base = root / "class" / "input" / event / "device"
+    (base / "capabilities").mkdir(parents=True)
+    (base / "id").mkdir()
+    (base / "name").write_text(name + "\n")
+    (base / "id" / "vendor").write_text(f"{vendor:04x}\n")
+    (base / "id" / "product").write_text(f"{product:04x}\n")
+    (base / "capabilities" / "key").write_text(key + "\n")
+    (base / "capabilities" / "abs").write_text(abs_ + "\n")
+    if driver:
+        drivers = root / "bus" / "hid" / "drivers" / driver
+        drivers.mkdir(parents=True, exist_ok=True)
+        (base / "device").mkdir()
+        (base / "device" / "driver").symlink_to(drivers)
+
+
+class Sysfs(unittest.TestCase):
+    """The pad is found from sysfs, where every device's name and capabilities are plain files: opening
+    a device to look at it costs a wait in close() (the kernel's evdev_release; 43 devices took 645 ms on
+    a test machine), and a sleeping pad was looked for each second."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+
+    def test_a_capability_bitmap_is_read_as_codes(self):
+        keys = hg.bitmap("7fdb000000000000 0 0 0 0")                  # a DualSense, as sysfs shows it
+        self.assertEqual(keys, set(hg.BUTTONS))
+        self.assertEqual(hg.bitmap("3003f"), {ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ, ABS_HAT0X, ABS_HAT0Y})
+        self.assertEqual(hg.bitmap("0"), set())
+
+    def test_the_desk_is_read_from_sysfs(self):
+        sysfs_device(self.root, "event10", "Logitech USB Receiver", 0x046D, 0xC548, "1f0000 0 0 0 0", "3")
+        sysfs_device(self.root, "event256", "ydotoold virtual device", 0x2333, 0x6666,
+                     "ffffffffffffffff ffffffffffffffff ffffffffffffffff ffffffffffffffff ffffffffffffffff", "0")
+        sysfs_device(self.root, "event259", "DualSense Wireless Controller Motion Sensors", 0x054C, 0x0CE6, "0", "3f")
+        sysfs_device(self.root, "event258", "DualSense Wireless Controller", 0x054C, 0x0CE6,
+                     "7fdb000000000000 0 0 0 0", "3003f", driver="playstation")
+        devices = hg.scan(str(self.root))
+        self.assertEqual([(d.path, d.gamepad) for d in devices],
+                         [("/dev/input/event10", False), ("/dev/input/event256", False),
+                          ("/dev/input/event258", True), ("/dev/input/event259", False)])
+        pad = devices[2]
+        self.assertEqual((pad.name, pad.vendor, pad.product, pad.driver),
+                         ("DualSense Wireless Controller", 0x054C, 0x0CE6, "playstation"))
+        names = hg.scan_profile(pad)
+        self.assertEqual((names.family, names.chord), ("playstation", frozenset({"home", "start"})))
+
+    def test_a_device_that_went_away_mid_scan_is_left_out(self):
+        sysfs_device(self.root, "event258", "DualSense Wireless Controller", 0x054C, 0x0CE6,
+                     "7fdb000000000000 0 0 0 0", "3003f")
+        (self.root / "class" / "input" / "event300").mkdir(parents=True)  # no device under it any more
+        self.assertEqual([d.path for d in hg.scan(str(self.root))], ["/dev/input/event258"])
+
+    def test_finding_the_pad_opens_the_pad_alone(self):
+        sysfs_device(self.root, "event10", "Logitech USB Receiver", 0x046D, 0xC548, "1f0000 0 0 0 0", "3")
+        sysfs_device(self.root, "event258", "DualSense Wireless Controller", 0x054C, 0x0CE6,
+                     "7fdb000000000000 0 0 0 0", "3003f")
+        opened = []
+
+        class Evdev:
+            @staticmethod
+            def InputDevice(path):
+                opened.append(path)
+                return path
+
+        from unittest import mock
+        with mock.patch.dict(sys.modules, {"evdev": Evdev}):
+            self.assertEqual(hg.find_pad(sysfs=str(self.root)), "/dev/input/event258")
+            self.assertEqual(opened, ["/dev/input/event258"])
+            opened.clear()
+            self.assertEqual(hg.find_pad("/dev/input/event258", sysfs=str(self.root)), "/dev/input/event258")
+            self.assertIsNone(hg.find_pad("/dev/input/event10", sysfs=str(self.root)))  # not a gamepad
+            self.assertEqual(opened, ["/dev/input/event258"])
+
+    def test_a_pad_that_will_not_open_gives_way_to_the_next(self):
+        sysfs_device(self.root, "event5", "Xbox Wireless Controller", 0x045E, 0x0B13, "7fdb000000000000 0 0 0 0", "3")
+        sysfs_device(self.root, "event258", "DualSense Wireless Controller", 0x054C, 0x0CE6,
+                     "7fdb000000000000 0 0 0 0", "3003f")
+
+        class Evdev:
+            @staticmethod
+            def InputDevice(path):
+                if path.endswith("event5"):
+                    raise PermissionError(13, "Permission denied")
+                return path
+
+        from unittest import mock
+        with mock.patch.dict(sys.modules, {"evdev": Evdev}):
+            self.assertEqual(hg.find_pad(sysfs=str(self.root)), "/dev/input/event258")
+
+
 class Profiles(unittest.TestCase):
     def test_a_real_dualsense_reads_as_it_always_did(self):
         """The default Profile is what the tests and the old pad assume; a DualSense as the kernel
