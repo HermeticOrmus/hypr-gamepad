@@ -1507,6 +1507,81 @@ class SysfsLightsFiles(unittest.TestCase):
         self.assertTrue(lights.broken)
 
 
+class OnlyWhatThePadHas(unittest.TestCase):
+    """Not every pad has a DualSense's extras. The mic button is read only on a DualSense: a DualShock
+    4's USB report carries a timestamp where the DualSense keeps the mic bit, so reading it there would
+    talk at random. The lights are the LED files the pad has; the battery is the pad's own power
+    supply, whatever its driver calls it."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+
+    def test_the_mic_button_is_read_only_on_a_dualsense(self):
+        self.assertTrue(sp.has_mic(0x054C, 0x0CE6))   # DualSense
+        self.assertTrue(sp.has_mic(0x054C, 0x0DF2))   # DualSense Edge
+        for vendor, product in ((0x054C, 0x09CC), (0x054C, 0x05C4), (0x045E, 0x0B13), (0x057E, 0x2009)):
+            self.assertFalse(sp.has_mic(vendor, product), hex(product))
+
+    def test_a_dualshock_report_reads_as_a_mic_press_which_is_why(self):
+        report = bytes([0x01, 128, 128, 128, 128, 0x08, 0, 0, 0, 0, 0x04, 0])  # byte 10: its timestamp
+        self.assertTrue(sp.mic_down(report))
+
+    def test_a_pad_with_a_lightbar_and_no_player_lights_gets_its_lightbar(self):
+        (self.root / "input7:rgb:indicator").mkdir()
+        lights = sp.SysfsLights("/sys/devices/x/input/input7", leds=str(self.root))
+        with self.assertNoLogs("hypr-gamepad", "INFO"):
+            lights.color((255, 150, 18))
+            lights.players((1,))
+        self.assertEqual((self.root / "input7:rgb:indicator" / "multi_intensity").read_text(), "255 150 18")
+        self.assertFalse(lights.broken)
+        self.assertEqual(sorted(p.name for p in self.root.iterdir()), ["input7:rgb:indicator"])
+
+    def test_a_pad_without_led_files_gets_no_lights_and_no_complaint(self):
+        lights = sp.SysfsLights("/sys/devices/x/input/input7", leds=str(self.root))
+        with self.assertNoLogs("hypr-gamepad", "INFO"):
+            lights.color((1, 2, 3))
+            lights.players((1, 2))
+        self.assertEqual(list(self.root.iterdir()), [])
+
+    def test_the_battery_is_the_pads_own_power_supply(self):
+        where = self.root / "input7"
+        supply = where / "device" / "power_supply" / "nintendo_switch_controller_battery_aa"
+        supply.mkdir(parents=True)
+        (supply / "capacity").write_text("75\n")
+        (supply / "status").write_text("Discharging\n")
+        self.assertEqual(sp.battery(str(where)), "75% discharging")
+        self.assertEqual(sp.battery(str(self.root / "input8")), "unknown")
+
+    def test_run_reads_no_mic_on_a_pad_without_one(self):
+        mics, served = [], []
+
+        class Stop(Exception):
+            pass
+
+        class Dev:
+            uniq, path, name = "", "/dev/input/event30", "Wireless Controller"
+
+            class info:
+                vendor, product = 0x054C, 0x09CC  # a DualShock 4
+
+            def close(self):
+                pass
+
+        def serve(dev, pad, motors, mic=None):
+            served.append(mic)
+            raise Stop
+
+        voice = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, voice)
+        with mock.patch.multiple(sp, find_pad=lambda path=None: Dev(), serve=serve, Motors=lambda dev, dry=False: FxLog(),
+                                 MicReader=lambda where: mics.append(where), input_dir=lambda dev: str(self.root),
+                                 DryHypr=FakeHypr, voice_dir=lambda: voice), \
+                mock.patch.object(sp.time, "sleep"), self.assertRaises(Stop):
+            sp.run_daemon(True, None)
+        self.assertEqual((mics, served), ([], [None]))
+
+
 class UdevRule(unittest.TestCase):
     def test_the_rule_reaches_only_the_dualsense_and_reads_its_raw_node(self):
         rules = [l for l in RULE.read_text().splitlines() if l and not l.startswith("#")]
