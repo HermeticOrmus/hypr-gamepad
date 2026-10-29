@@ -1,0 +1,1950 @@
+#!/usr/bin/env python3
+"""hypr-gamepad: the DualSense drives Hyprland.
+
+The aim: herdr's agents, voice-to-text dictation, and every window, tab, herdr space and workspace,
+driven from the controller alone, with the hands off the keyboard.
+
+    hypr-gamepad run [--dry] [--device PATH]   the daemon; hypr-gamepad.service runs it
+    hypr-gamepad status                        the pad, its battery, Hyprland
+    hypr-gamepad check                         every action builds in the running Hyprland (runs none)
+    hypr-gamepad map [--json]                  what each control does, read from LAYOUT
+
+Inside the focused window (herdr here or on another machine, a browser, the Sun board, any window):
+
+    Cross        Enter: send, confirm
+    Circle       Esc: back, stop the agent
+    Square       take back: delete the word before the cursor (Ctrl+W in herdr and terminals,
+                 Ctrl+Backspace elsewhere); held, it keeps deleting, faster and faster. Never Esc:
+                 a running agent keeps running
+    D-pad        arrow keys (held: they repeat)
+    L1 / R1      previous / next tab: herdr's, the browser's, the board's, a window group's
+    Left stick   up / down: previous / next agent; left / right: previous / next herdr space
+                 (the browser: back / forward; the board: the tile before / after)
+    L3           Shift+Tab: the agent's mode (plan, accept edits)
+    R3           normal text size in the focused window (Ctrl+0), in either layer
+    Right stick  scroll, smoothly: the further it tilts, the faster
+
+Agents that wait on you:
+
+    Triangle     show in herdr the agent that waits on you most; again: the next one
+    PS tap       raise the Sun board
+    PS held      the sessions wheel on this screen: the right stick lights a slot, let go of PS to
+                 show it in herdr; Circle closes it
+
+The map, in either layer:
+
+    Options held what each control does in the focused window, on screen; a tap keeps it up until
+                 the next one (the shell plugin ormus.hypr-gamepad-map)
+
+Talk, in either layer:
+
+    R2 held      talk; let go and the words land in the focused window (voice-flow, as Super+H)
+    R2 tap       keeps listening until the next tap
+    Mic button   talk: a press starts, the next press pastes (needs the udev rule below)
+    Circle       while talking: drop the recording, nothing is pasted
+    Create       the voice-ideas listener on / off (as Super+Shift+H)
+
+The pad's lights (needs the udev rule below):
+
+    lightbar     gold at the desk, flare red while talking, cream while L2 holds the desktop side,
+                 blue in game mode
+    player light which screen has focus, as a PS5 numbers its players: one, two, three, four
+
+The udev rule (udev/60-hypr-gamepad.rules, installed by hand into /etc/udev/rules.d) lets the user
+at the seat set the lights and read the raw reports, where the mic button is. Without it the pad
+still works, without lights and mic button; `hypr-gamepad status` says.
+
+Games:
+
+    PS + Options game mode on / off: the daemon lets go of the pad, so a game reads it; nothing else
+                 acts until the same chord brings it back (a long rumble going, a double coming back)
+
+L2 held is the world layer, the desktop:
+
+    D-pad        focus the window in that direction, across screens
+    L1 / R1      previous / next workspace on this screen
+    Left stick   focus the screen in that direction; with none beside, left / right go to the
+                 screen before / after (screens stacked in a column have none beside)
+    Right stick  up / down: bigger / smaller text in the focused window (Ctrl+= / Ctrl+-: foot and
+                 the herdr windows, browsers); held, it keeps going. A tilt held from scrolling
+                 when L2 goes down waits for the stick to come back first
+    Cross        full screen on / off
+    Circle       back to the workspace before
+    Square       next window on this workspace
+    Triangle     scratchpad on / off
+
+The daemon grabs the pad, so no other program reads it while it runs; game mode (PS + Options)
+gives it to a game. Each press becomes one action from LAYOUT, sent to Hyprland over its request socket as
+a Lua dispatcher: 0.5 ms a call, where hyprctl takes 16 ms (measured on a test machine, 2026-10-29). Nothing is
+typed into the desktop through uinput: a key for a window goes to that window through Hyprland's
+send_shortcut, which hands the window the key and gives focus back in the same call. --dry prints each action instead of sending it, and reads
+Hyprland only to look.
+"""
+from __future__ import annotations
+
+import argparse
+import glob
+import json
+import logging
+import os
+import re
+import select
+import signal
+import socket
+import subprocess
+import sys
+import tempfile
+import time
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any, Callable, Protocol
+
+log = logging.getLogger("hypr-gamepad")
+
+PAD_NAMES = {"DualSense Wireless Controller", "DualSense Edge Wireless Controller"}
+BATTERY = "/sys/class/power_supply/ps-controller-battery-{mac}"
+
+# Kernel input codes (linux/input-event-codes.h). python-evdev is imported only where the pad is
+# opened, so this file loads where evdev is missing (the tests run on machines without it).
+EV_SYN, EV_KEY, EV_ABS = 0x00, 0x01, 0x03
+SYN_REPORT, SYN_DROPPED = 0, 3
+ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_HAT0X, ABS_HAT0Y = 0x00, 0x01, 0x03, 0x04, 0x10, 0x11
+AXES = (ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_HAT0X, ABS_HAT0Y)
+# hid-playstation's button codes, by the names printed on the pad.
+BUTTONS = {
+    0x130: "cross", 0x131: "circle", 0x133: "triangle", 0x134: "square",
+    0x136: "l1", 0x137: "r1", 0x138: "l2", 0x139: "r2",
+    0x13A: "create", 0x13B: "options", 0x13C: "ps", 0x13D: "l3", 0x13E: "r3",
+}
+STICKS = {ABS_X: ("left", 0), ABS_Y: ("left", 1), ABS_RX: ("right", 0), ABS_RY: ("right", 1)}
+LAYER_KEY = "l2"  # held: the world layer
+GAME_CHORD = {"ps", "options"}  # together: game mode on / off
+
+# A stick flick engages past FLICK_ON and lets go under FLICK_OFF (of full tilt), so a stick that
+# rests near the edge does not chatter.
+FLICK_ON, FLICK_OFF = 0.62, 0.38
+# Held controls repeat: (first repeat after, then every), in seconds; a third and fourth number speed
+# it up: every that often, reached that many seconds after the first repeat.
+REPEAT = {"fast": (0.32, 0.07), "slow": (0.45, 0.22), "words": (0.40, 0.12, 0.06, 1.5)}
+TICK_S = 0.01
+
+
+def repeat_gap(profile: str, held: float) -> float:
+    """The wait before the next repeat of a control held for `held` seconds."""
+    first, gap, *speedup = REPEAT[profile]
+    if not speedup:
+        return gap
+    fastest, ramp = speedup
+    return gap + (fastest - gap) * min(1.0, max(0.0, (held - first) / ramp))
+
+
+# --- Hyprland ------------------------------------------------------------------------------------
+
+class Hypr:
+    """Hyprland's request socket, one connection per request as hyprctl does.
+
+    The signature is found again when Hyprland restarts (a new instance, a new directory)."""
+
+    def __init__(self, runtime: str | None = None, signature: str | None = None, timeout: float = 1.0):
+        self.runtime = runtime or os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}"
+        self.signature = signature if signature is not None else os.environ.get("HYPRLAND_INSTANCE_SIGNATURE", "")
+        self.timeout = timeout
+        self.down = False  # logged once per outage
+
+    def socket_path(self) -> str | None:
+        if self.signature:
+            path = os.path.join(self.runtime, "hypr", self.signature, ".socket.sock")
+            if os.path.exists(path):
+                return path
+        found = sorted(glob.glob(os.path.join(self.runtime, "hypr", "*", ".socket.sock")), key=os.path.getmtime)
+        if not found:
+            return None
+        self.signature = Path(found[-1]).parent.name
+        return found[-1]
+
+    def request(self, message: str) -> str | None:
+        path = self.socket_path()
+        try:
+            if path is None:
+                raise FileNotFoundError("no Hyprland socket")
+            with socket.socket(socket.AF_UNIX, socket.SOCK_STREAM) as sock:
+                sock.settimeout(self.timeout)
+                sock.connect(path)
+                sock.sendall(message.encode())
+                chunks = []
+                while chunk := sock.recv(65536):
+                    chunks.append(chunk)
+        except OSError as exc:
+            if not self.down:
+                log.info("Hyprland does not answer: %s", exc)
+            self.down = True
+            self.signature = ""  # look again next time: Hyprland may have restarted
+            return None
+        if self.down:
+            log.info("Hyprland answers again")
+        self.down = False
+        return b"".join(chunks).decode("utf-8", "replace")
+
+    def _ok(self, verb: str, text: str) -> bool:
+        answer = self.request(f"{verb} {text}")
+        if answer is not None and answer.strip() == "ok":
+            return True
+        if answer is not None:
+            log.info("%s %s: %s", verb, text, answer.strip())
+        return False
+
+    def dispatch(self, expr: str) -> bool:
+        """Run one Lua dispatcher expression, e.g. hl.dsp.focus({ direction = "l" })."""
+        return self._ok("dispatch", expr)
+
+    def eval(self, lua: str) -> bool:
+        """Run a Lua chunk in Hyprland's config state (where omaspaces.split lives)."""
+        return self._ok("eval", lua)
+
+    def json(self, what: str) -> Any:
+        answer = self.request(f"j/{what}")
+        try:
+            return json.loads(answer) if answer else None
+        except json.JSONDecodeError:
+            return None
+
+
+class DryHypr(Hypr):
+    """Looks at Hyprland but changes nothing: every dispatch and eval is printed."""
+
+    def dispatch(self, expr: str) -> bool:
+        print(f"dry: dispatch {expr}", flush=True)
+        return True
+
+    def eval(self, lua: str) -> bool:
+        print(f"dry: eval {lua}", flush=True)
+        return True
+
+
+# --- The focused window ---------------------------------------------------------------------------
+
+TERMINALS = {"foot", "kitty", "Alacritty", "com.mitchellh.ghostty", "org.wezfurlong.wezterm", "org.omarchy.terminal"}
+BROWSERS = {"chromium", "google-chrome", "zen", "firefox", "brave-browser", "microsoft-edge"}
+HERDR_CLASSES = {"org.omarchy.herdr"}
+WORKBOARD = "org.ormus.workboard."  # a workboard window: a herdr client on another machine, over SSH
+HERDR_PROGRAMS = {"herdr", "herdr-theme"}
+# herdr titles its window "{hostname}: {workspace}" (ui.window_title): "desktop: MAIN",
+# "server: BACKEND". The title is all that tells a terminal running herdr on another machine
+# over a plain `ssh`; a shell's own title carries "user@host".
+HERDR_TITLE = re.compile(r"^[A-Za-z0-9][\w.-]*: \S")
+
+
+@dataclass(frozen=True)
+class Window:
+    address: str
+    cls: str
+    title: str
+    kind: str      # herdr | board | browser | terminal | other
+    grouped: int   # windows in its Hyprland group; 0 when it is in none
+
+
+def classify(cls: str, title: str, herdr_runs: bool) -> str:
+    if cls in HERDR_CLASSES or cls.startswith(WORKBOARD):
+        return "herdr"
+    if title == "Sun board":
+        return "board"
+    if cls in BROWSERS:
+        return "browser"
+    if cls in TERMINALS:
+        return "herdr" if herdr_runs or HERDR_TITLE.match(title) else "terminal"
+    return "other"
+
+
+def runs_herdr(pid: int, proc: str = "/proc", depth: int = 4) -> bool:
+    """Whether a herdr client runs under this process: a local one (foot > bash > herdr) or one on
+    another machine (foot > bash > ssh server ... herdr-theme attach)."""
+    frontier = [pid]
+    for _ in range(depth):
+        found: list[int] = []
+        for parent in frontier:
+            try:
+                kids = Path(proc, str(parent), "task", str(parent), "children").read_text().split()
+            except OSError:
+                continue
+            for kid in kids:
+                try:
+                    argv = Path(proc, kid, "cmdline").read_bytes().split(b"\0")
+                except OSError:
+                    continue
+                if any(Path(arg.decode(errors="replace")).name in HERDR_PROGRAMS for arg in argv if arg):
+                    return True
+                found.append(int(kid))
+        frontier = found[:64]
+    return False
+
+
+class Windows:
+    """The focused window, read from Hyprland at the moment of a press."""
+
+    def __init__(self, hypr: Hypr, proc: str = "/proc"):
+        self.hypr, self.proc = hypr, proc
+
+    def active(self) -> Window | None:
+        data = self.hypr.json("activewindow")
+        if not isinstance(data, dict) or not data.get("address"):
+            return None
+        cls, title = str(data.get("class") or ""), str(data.get("title") or "")
+        pid = int(data.get("pid") or 0)
+        herdr = cls in TERMINALS and pid > 0 and runs_herdr(pid, self.proc)
+        grouped = data.get("grouped")
+        return Window(str(data["address"]), cls, title, classify(cls, title, herdr),
+                      len(grouped) if isinstance(grouped, list) else 0)
+
+
+# --- What the pad does besides Hyprland ----------------------------------------------------------
+
+class Fx:
+    """Rumble and notifications. The shell's Motors drives the pad; this one does nothing."""
+
+    def rumble(self, pattern: str) -> None:
+        pass
+
+    def notify(self, title: str, body: str = "") -> None:
+        pass
+
+    def pump(self, now: float) -> None:
+        """Called every tick: play what was scheduled."""
+
+
+# --- Talking -------------------------------------------------------------------------------------
+
+class Proc(Protocol):
+    def poll(self) -> int | None: ...
+
+
+class Runner:
+    """Starts programs in their own session, so a restart of hypr-gamepad never cuts a paste short, and
+    reaps them."""
+
+    def __init__(self) -> None:
+        self.children: list[subprocess.Popen[bytes]] = []
+
+    def spawn(self, argv: list[str]) -> Proc | None:
+        try:
+            child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                     stderr=subprocess.DEVNULL, start_new_session=True)
+        except OSError as exc:
+            log.info("%s: %s", argv[0], exc)
+            return None
+        self.children.append(child)
+        return child
+
+    def capture(self, argv: list[str], out: Path) -> Proc | None:
+        """Starts a program whose answer is read later from `out` (a file, so a long answer never
+        fills a pipe that nobody reads until the program ends)."""
+        try:
+            with out.open("wb") as sink:
+                child = subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=sink, stderr=subprocess.DEVNULL,
+                                         start_new_session=True)
+        except OSError as exc:
+            log.info("%s: %s", argv[0], exc)
+            return None
+        self.children.append(child)
+        return child
+
+    def reap(self) -> None:
+        self.children = [c for c in self.children if c.poll() is None]
+
+
+class DryRunner(Runner):
+    """--dry: says what it would start, starts nothing."""
+
+    class Done:
+        def poll(self) -> int | None:
+            return 0
+
+    def spawn(self, argv: list[str]) -> Proc | None:
+        print(f"dry: run {' '.join(argv)}", flush=True)
+        return self.Done()
+
+    def capture(self, argv: list[str], out: Path) -> Proc | None:
+        """Reading is harmless: --dry reads the wheel's list for real, so the dry jump names its agent."""
+        return Runner.capture(self, argv, out)
+
+
+def voice_dir() -> Path:
+    return Path(os.environ.get("XDG_RUNTIME_DIR") or f"/run/user/{os.getuid()}", "ormus-voice")
+
+
+TAP_S = 0.35  # a control let go sooner than this was tapped
+TALK_LATCH_S = TAP_S
+START_WAIT_S = 3.0  # how long a pad that went away waits for a starting recorder before dropping it  # R2 let go sooner than this was a tap: the recording goes on until the next tap
+
+
+class Talk:
+    """R2: hold to talk, let go to paste; a tap keeps listening until the next tap.
+
+    voice-flow does the work, as Super+H: its first call starts recording (recording.state appears),
+    its second transcribes and pastes into the focused window, or leaves the words on the clipboard
+    when focus moved meanwhile. States: idle -> starting -> recording -> stopping -> idle.
+
+    recording.state is the truth: a recording that ended without Talk (Super+H, voice-flow's own cap)
+    sends Talk back to idle, and a pad that goes away waits for a starting recorder and drops it, so
+    nothing the user did not let go of is ever pasted (independent review, 2026-10-29)."""
+
+    def __init__(self, runner: Runner, fx: Fx, clock: Callable[[], float], state_dir: Path):
+        self.runner, self.fx, self.clock, self.dir = runner, fx, clock, state_dir
+        self.sleep: Callable[[float], None] = time.sleep  # reset() waits on a starting recorder
+        self.state = "idle"
+        self.proc: Proc | None = None
+        self.held = False
+        self.pressed_at = 0.0
+        self.stop_wanted = self.drop_wanted = False
+
+    def recording_file(self) -> Path:
+        return self.dir / "recording.state"
+
+    def active(self) -> bool:
+        return self.state in ("starting", "recording")
+
+    def call_voice_flow(self, next_state: str) -> None:
+        self.proc = self.runner.spawn(["voice-flow"])
+        if self.proc is None:
+            self.fx.notify("Talk", "voice-flow did not start")
+            self.state, self.held = "idle", False
+            return
+        self.state = next_state
+
+    def ended_elsewhere(self) -> bool:
+        """Talk records, but voice-flow's file is gone: something else ended the recording."""
+        if self.state == "recording" and not self.recording_file().exists():
+            log.info("talk: the recording ended without the pad")
+            self.state, self.held = "idle", False
+            return True
+        return False
+
+    def press(self) -> None:
+        self.ended_elsewhere()
+        if self.state == "idle":
+            if self.recording_file().exists():  # a recording from Super+H: R2 ends it
+                self.call_voice_flow("stopping")
+                return
+            self.held, self.pressed_at = True, self.clock()
+            self.stop_wanted = self.drop_wanted = False
+            self.fx.rumble("tick")
+            self.call_voice_flow("starting")
+        elif self.state == "recording":           # latched: this tap ends it
+            self.call_voice_flow("stopping")
+        elif self.state == "starting":
+            self.stop_wanted = True
+        else:
+            self.fx.notify("Talk", "Still pasting the last words")
+
+    def release(self) -> None:
+        if not self.held:
+            return
+        self.held = False
+        if self.clock() - self.pressed_at < TALK_LATCH_S:
+            self.fx.rumble("click")               # a tap: it keeps listening
+            return
+        if self.state == "starting":
+            self.stop_wanted = True
+        elif self.state == "recording":
+            self.call_voice_flow("stopping")
+
+    def drop(self) -> bool:
+        """Circle while talking: the recording goes, nothing is pasted. True when it dropped one."""
+        self.ended_elsewhere()
+        if not self.active():
+            return False
+        self.held = False
+        if self.state == "starting":
+            self.drop_wanted = True
+        else:
+            self.discard()
+        return True
+
+    def discard(self) -> None:
+        """Stop the recorder voice-flow started (recording.state holds its pid and file), delete its file,
+        tell the pill."""
+        state = self.recording_file()
+        try:
+            pid, _, wav = state.read_text(encoding="utf-8", errors="replace").partition(":")
+        except OSError:
+            pid, wav = "", ""
+        state.unlink(missing_ok=True)
+        if pid.strip().isdigit():
+            try:
+                os.kill(int(pid.strip()), signal.SIGTERM)
+            except OSError:
+                pass
+        if wav.strip():
+            Path(wav.strip()).unlink(missing_ok=True)
+        (self.dir / "agent.mode").unlink(missing_ok=True)
+        try:
+            (self.dir / "pill.state").write_text("cancel", encoding="utf-8")
+        except OSError:
+            pass
+        self.state, self.proc = "idle", None
+        self.fx.rumble("click")
+
+    def tick(self) -> None:
+        self.ended_elsewhere()
+        if self.proc is None or self.proc.poll() is None:
+            return
+        self.proc = None
+        if self.state == "starting":
+            if self.drop_wanted:
+                self.discard()
+            elif not self.recording_file().exists():
+                self.state = "idle"
+                self.fx.notify("Talk", "The recording did not start")
+            else:
+                self.state = "recording"
+                if self.stop_wanted:
+                    self.call_voice_flow("stopping")
+        elif self.state == "stopping":
+            self.state = "idle"
+            pill = ""
+            try:
+                pill = (self.dir / "pill.state").read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                pass
+            # done: pasted; copied: on the clipboard because focus moved; cancel:<why>: nothing heard
+            self.fx.rumble("double" if pill.startswith(("done", "copied")) else "tick")
+
+    def reset(self) -> None:
+        """The pad went away mid-sentence, or the daemon stops: never paste what nobody let go of.
+
+        The daemon drops this Pad afterwards and never ticks it again, so a recorder still starting
+        is waited for here (voice-flow's start takes about 0.3 s) and then dropped."""
+        self.ended_elsewhere()
+        if not self.active():
+            self.held = False
+            return
+        if self.state == "starting" and self.proc is not None:
+            waited = 0.0
+            while self.proc.poll() is None and waited < START_WAIT_S:
+                self.sleep(0.05)
+                waited += 0.05
+            if self.proc.poll() is None:
+                log.info("talk: voice-flow's start did not end in %.0f s; dropping what is there", START_WAIT_S)
+        self.discard()  # recording.state, if voice-flow's start wrote it: its recorder is stopped
+        self.fx.notify("Talk", "The pad went away: the recording was dropped")
+        self.held = False
+
+
+# --- Scrolling -----------------------------------------------------------------------------------
+
+SCROLL_DEAD = 0.18               # tilt below this is the stick at rest
+SCROLL_MAX = (2400.0, 1200.0)    # hi-res wheel units a second at full tilt: up/down, left/right (120 = a notch)
+
+
+def scroll_rate(tilt: float, top: float) -> float:
+    """Hi-res units a second for a tilt in -1..1: nothing in the dead zone, then a square curve, so a
+    small tilt reads line by line and a full one flies."""
+    if abs(tilt) <= SCROLL_DEAD:
+        return 0.0
+    share = (abs(tilt) - SCROLL_DEAD) / (1.0 - SCROLL_DEAD)
+    return (1.0 if tilt > 0 else -1.0) * share * share * top
+
+
+POINTER_TO = "hl.dsp.cursor.move({{ x = {x}, y = {y} }})"
+
+
+class Wheel:
+    """Where scroll goes: a virtual mouse wheel (the shell's is a uinput device; this one does nothing)."""
+
+    def scroll(self, vertical: int, horizontal: int, notches_v: int, notches_h: int) -> None:
+        pass
+
+
+class Scroll:
+    """The right stick as a smooth wheel. A wheel scrolls what is under the pointer, so when a scroll
+    starts with the pointer outside the focused window, the pointer first moves to that window's
+    middle: the scroll goes where the user looks, and focus stays (the pointer lands in the focused window)."""
+
+    def __init__(self, hypr: Hypr, wheel: Wheel, clock: Callable[[], float]):
+        self.hypr, self.wheel, self.clock = hypr, wheel, clock
+        self.x = self.y = 0.0
+        self.moving = False
+        self.last = clock()
+        self.paused = False       # after the wheel: no scroll until the stick has rested once
+        self.carry = [0.0, 0.0]   # hi-res units not sent yet: vertical, horizontal
+        self.notch = [0.0, 0.0]   # hi-res units toward the next low-res notch
+
+    def stick(self, x: float, y: float) -> None:
+        if self.paused and abs(x) <= SCROLL_DEAD and abs(y) <= SCROLL_DEAD:
+            self.paused = False
+        self.x, self.y = (0.0, 0.0) if self.paused else (x, y)
+
+    def pause(self) -> None:
+        self.paused = True
+        self.x = self.y = 0.0
+
+    def tick(self) -> None:
+        now = self.clock()
+        elapsed, self.last = min(now - self.last, 0.1), now
+        rate_v, rate_h = scroll_rate(-self.y, SCROLL_MAX[0]), scroll_rate(self.x, SCROLL_MAX[1])
+        if not rate_v and not rate_h:
+            if self.moving:
+                self.moving = False
+                self.carry = [0.0, 0.0]
+                self.wheel.scroll(0, 0, 0, 0)  # the end of a gesture (the dry wheel says its total)
+            return
+        if not self.moving:
+            self.moving = True
+            self.aim_pointer()
+        out = []
+        for axis, rate in enumerate((rate_v, rate_h)):
+            self.carry[axis] += rate * elapsed
+            units = int(self.carry[axis])
+            self.carry[axis] -= units
+            self.notch[axis] += units
+            notches = int(self.notch[axis] / 120)
+            self.notch[axis] -= notches * 120
+            out += [units, notches]
+        if any(out):
+            self.wheel.scroll(out[0], out[2], out[1], out[3])
+
+    def aim_pointer(self) -> None:
+        win, pos = self.hypr.json("activewindow"), self.hypr.json("cursorpos")
+        try:
+            (wx, wy), (ww, wh) = win["at"], win["size"]
+            px, py = pos["x"], pos["y"]
+        except (KeyError, TypeError, ValueError):
+            return
+        if wx <= px < wx + ww and wy <= py < wy + wh:
+            return
+        self.hypr.dispatch(POINTER_TO.format(x=wx + ww // 2, y=wy + wh // 2))
+
+    def reset(self) -> None:
+        self.x = self.y = 0.0
+        self.moving = False
+        self.carry = [0.0, 0.0]
+
+
+# --- The sessions wheel ---------------------------------------------------------------------------
+
+WHEEL_ID = "ormus.sessions-wheel"
+AIM_EVERY_S = 0.03   # the stick's aim reaches the wheel at most this often
+AIM_STEP = 0.05      # and only when it moved this much
+
+
+def focused_center(hypr: Hypr) -> tuple[float, float] | None:
+    """The middle of the focused screen, in Hyprland's layout coordinates (logical pixels)."""
+    for mon in hypr.json("monitors") or []:
+        if not isinstance(mon, dict) or not mon.get("focused"):
+            continue
+        try:
+            scale = float(mon.get("scale") or 1.0)
+            width, height = float(mon["width"]) / scale, float(mon["height"]) / scale
+            if int(mon.get("transform") or 0) % 2:  # turned a quarter: width and height swap
+                width, height = height, width
+            return float(mon["x"]) + width / 2, float(mon["y"]) + height / 2
+        except (KeyError, TypeError, ValueError):
+            return None
+    return None
+
+
+class SessionsWheel:
+    """PS held: the sessions wheel (Omarchy shell plugin ormus.sessions-wheel) opens in the middle of
+    the focused screen; the right stick lights the slot it points at; letting go of PS shows that
+    session in herdr (the wheel runs `sun-wheel jump`, as for the mouse); Circle closes it, no jump.
+
+    It talks to the wheel the way ~/.config/hypr/sessions_wheel.lua does, with Hyprland events:
+    "padhold <token> <x> <y>", "aim <token> <sx> <sy>", "release <token> nan nan", "cancel"."""
+
+    def __init__(self, hypr: Hypr, fx: Fx, clock: Callable[[], float]):
+        self.hypr, self.fx, self.clock = hypr, fx, clock
+        self.token: str | None = None
+        self.seq = 0
+        self.sent = self.want = (0.0, 0.0)
+        self.last = float("-inf")
+
+    def send(self, message: str) -> None:
+        self.hypr.dispatch(f'hl.dsp.event("{WHEEL_ID} {message}")')
+
+    def open(self) -> None:
+        center = focused_center(self.hypr)
+        x, y = center if center else (float("nan"), float("nan"))
+        self.seq += 1
+        self.token = f"pad{int(time.time())}-{self.seq}"
+        self.sent = self.want = (0.0, 0.0)
+        self.send(f"padhold {self.token} {x:.1f} {y:.1f}")
+        self.fx.rumble("click")
+
+    def aim(self, x: float, y: float) -> None:
+        if self.token is None:
+            return
+        self.want = (round(x / AIM_STEP) * AIM_STEP, round(y / AIM_STEP) * AIM_STEP)
+        self.flush()
+
+    def flush(self, now: bool = False) -> None:
+        if self.token is None or self.want == self.sent:
+            return
+        if not now and self.clock() - self.last < AIM_EVERY_S:
+            return
+        self.last, self.sent = self.clock(), self.want
+        self.send(f"aim {self.token} {self.want[0]:.2f} {self.want[1]:.2f}")
+
+    def release(self) -> None:
+        if self.token is None:
+            return
+        self.flush(now=True)
+        self.send(f"release {self.token} nan nan")
+        self.token = None
+
+    def cancel(self) -> bool:
+        if self.token is None:
+            return False
+        self.send("cancel")
+        self.token = None
+        self.fx.rumble("click")
+        return True
+
+
+# --- Jumping to the agent that waits --------------------------------------------------------------
+
+JUMP_CYCLE_S = 10.0  # Triangle again within this walks on down the same list; later, a fresh list
+
+
+class Jump:
+    """Triangle: show in herdr the agent that waits on the user most; press again for the next one.
+
+    The list is the sessions wheel's (`sun-wheel items`: the Sun board's own triage, what needs the
+    user first), so the pad, the wheel and the board never disagree. The jump is `sun-wheel jump`, the
+    same as a wheel slot or a click on the board: an agent on another machine can open its workboard
+    window first."""
+
+    def __init__(self, runner: Runner, fx: Fx, clock: Callable[[], float]):
+        self.runner, self.fx, self.clock = runner, fx, clock
+        self.items: list[dict[str, Any]] = []
+        self.index = -1
+        self.last = float("-inf")
+        self.listing: tuple[Proc, Path] | None = None
+        self.jumping: Proc | None = None
+
+    def press(self) -> None:
+        if self.listing is not None:
+            return  # the list is on its way
+        now = self.clock()
+        if self.items and now - self.last < JUMP_CYCLE_S:
+            self.last = now
+            self.index = (self.index + 1) % len(self.items)
+            self.go()
+            return
+        self.last = now
+        handle, name = tempfile.mkstemp(prefix="hypr-gamepad-wheel-", suffix=".json")
+        os.close(handle)
+        out = Path(name)
+        proc = self.runner.capture(["sun-wheel", "items"], out)
+        if proc is None:
+            out.unlink(missing_ok=True)
+            self.fx.notify("Agents", "sun-wheel did not start")
+            return
+        self.listing = (proc, out)
+
+    def tick(self) -> None:
+        if self.listing is not None and self.listing[0].poll() is not None:
+            proc, out = self.listing
+            self.listing = None
+            try:
+                items = json.loads(out.read_text(encoding="utf-8")).get("items") if proc.poll() == 0 else None
+            except (OSError, ValueError, AttributeError):
+                items = None
+            out.unlink(missing_ok=True)
+            if not isinstance(items, list):
+                self.items = []
+                self.fx.notify("Agents", "The Sun board does not answer")
+            elif not items:
+                self.items = []
+                self.fx.rumble("click")
+                self.fx.notify("Agents", "Nothing waits on you")
+            else:
+                self.items, self.index = items, 0
+                self.go()
+        if self.jumping is not None and self.jumping.poll() is not None:
+            if self.jumping.poll() == 0:
+                self.fx.rumble("double")
+            self.jumping = None  # a failed jump: sun-wheel --notify already said why
+
+    def go(self) -> None:
+        item = self.items[self.index]
+        where = " · ".join(str(x) for x in (item.get("host"), item.get("workspace")) if x)
+        why = item.get("why") or {"blocked": "waits on you", "done": "done, not seen yet"}.get(str(item.get("lane")), "")
+        self.fx.notify(f"{self.index + 1} of {len(self.items)}: {item.get('name') or item.get('key')}",
+                       " · ".join(x for x in (where, why) if x))
+        self.fx.rumble("tick")
+        self.jumping = self.runner.spawn(["sun-wheel", "jump", str(item.get("key")), "--notify"])
+
+    def reset(self) -> None:
+        if self.listing is not None:
+            self.listing[1].unlink(missing_ok=True)
+        self.listing = None
+
+
+# --- The map on screen ----------------------------------------------------------------------------
+
+MAP_ID = "ormus.hypr-gamepad-map"
+
+
+class PadMap:
+    """Options: the shell plugin ormus.hypr-gamepad-map shows what each control does, for the focused
+    window's kind and the layer in force; it reads the rows from `hypr-gamepad map --json`, this file's own
+    table. Held: up while held. Tapped: up until the next Options. L2 while it is up shows the desktop
+    side. Hyprland events: "show <kind> <layer> <grouped 0|1>", "hide"."""
+
+    def __init__(self, hypr: Hypr, clock: Callable[[], float]):
+        self.hypr, self.clock = hypr, clock
+        self.up = False
+        self.latched = False
+        self.kind = "other"
+        self.grouped = False
+        self.pressed_at = 0.0
+
+    def send(self, message: str) -> None:
+        self.hypr.dispatch(f'hl.dsp.event("{MAP_ID} {message}")')
+
+    def press(self, kind: str, layer: str, grouped: bool = False) -> None:
+        if self.up and self.latched:
+            self.hide()
+            self.pressed_at = float("-inf")  # this press only closed it
+            return
+        self.kind, self.grouped = kind, grouped
+        self.pressed_at, self.up, self.latched = self.clock(), True, False
+        self.send(f"show {kind} {layer} {int(grouped)}")
+
+    def release(self) -> None:
+        if not self.up:
+            return
+        if self.clock() - self.pressed_at < TAP_S:
+            self.latched = True
+        else:
+            self.hide()
+
+    def layer(self, layer: str) -> None:
+        if self.up:
+            self.send(f"show {self.kind} {layer} {int(self.grouped)}")
+
+    def hide(self) -> None:
+        if self.up:
+            self.send("hide")
+        self.up = self.latched = False
+
+
+# --- The pad's lights ------------------------------------------------------------------------------
+
+# Lightbar colours, red green blue (the pad's LEDs run warm: these read as the named colours on it).
+LIGHT = {
+    "desk": (255, 150, 18),    # gold: at the desk
+    "world": (255, 214, 160),  # cream: L2 holds the desktop side
+    "talk": (255, 44, 20),     # flare red: the mic is live
+    "game": (24, 70, 255),     # blue: a game has the pad
+}
+# Player lights 1-5 left to right, the way a PS5 numbers its players.
+PLAYERS = {1: (3,), 2: (2, 4), 3: (1, 3, 5), 4: (1, 2, 4, 5)}
+SCREEN_EVERY_S = 0.5  # how often the focused screen is read for the player lights
+
+
+class Lights:
+    """The lightbar and the player lights (the shell's are the pad's LED files; this one does nothing)."""
+
+    def color(self, rgb: tuple[int, int, int]) -> None:
+        pass
+
+    def players(self, lit: tuple[int, ...]) -> None:
+        pass
+
+
+def focused_screen(hypr: Hypr) -> int | None:
+    """1 for the first screen Hyprland lists, 2 for the next, ...: the focused one's place."""
+    mons = hypr.json("monitors")
+    if not isinstance(mons, list):
+        return None
+    ordered = sorted((m for m in mons if isinstance(m, dict)), key=lambda m: m.get("id", 0))
+    for place, mon in enumerate(ordered, start=1):
+        if mon.get("focused"):
+            return place
+    return None
+
+
+# --- Actions -------------------------------------------------------------------------------------
+
+@dataclass(frozen=True)
+class Action:
+    label: str                                  # what the map says
+    run: Callable[["Pad", "Press"], None]
+    repeat: str | None = None                   # a REPEAT profile while held
+    window: bool = False                        # needs the focused window, read at the press
+    release: Callable[["Pad", "Press"], None] | None = None  # when the control is let go
+    tap: bool = False                           # runs when let go quickly; a long hold is left for more
+    hold: Callable[["Pad", "Press"], None] | None = None  # once, when held past TAP_S
+    labels: dict[str, str] | None = None        # what the map says in a window of that kind
+
+
+@dataclass
+class Press:
+    control: str
+    layer: str
+    action: Action
+    window: Window | None = None                # the focused window at the press; repeats keep it
+    next_at: float | None = None                # the next repeat
+    started: float = 0.0
+    hold_fired: bool = False
+
+
+@dataclass(frozen=True)
+class dispatch:
+    """An action that is one Lua dispatcher. Its probe builds the dispatcher without running it:
+    Hyprland checks the arguments when it builds one, so `hypr-gamepad check` finds a renamed dispatcher
+    or a bad argument after a Hyprland update without moving anything on the screen."""
+
+    expr: str
+
+    def __call__(self, pad: "Pad", press: Press) -> None:
+        pad.hypr.dispatch(self.expr)
+
+    @property
+    def probes(self) -> list[str]:
+        return [f"local _ = {self.expr}"]
+
+
+@dataclass(frozen=True)
+class evaluate:
+    """An action that is a Lua chunk, and a chunk that checks it without running it."""
+
+    lua: str
+    probe: str
+
+    def __call__(self, pad: "Pad", press: Press) -> None:
+        pad.hypr.eval(self.lua)
+
+    @property
+    def probes(self) -> list[str]:
+        return [self.probe]
+
+
+def screen_toward(monitors: Any, direction: str) -> str | None:
+    """The screen to focus from the focused one: the nearest whose middle lies that way (its offset
+    that way at least as large as its offset across), else, for left and right, the one before or
+    after in reading order (top to bottom, then left to right), round. Up past the top, down past the
+    bottom, or no focused screen: None."""
+    if not isinstance(monitors, list):
+        return None
+    screens = []
+    for m in monitors:
+        try:
+            w, h = m["width"] / m["scale"], m["height"] / m["scale"]
+            if int(m.get("transform", 0)) % 2:   # turned a quarter: the sides swap
+                w, h = h, w
+            screens.append((m["y"] + h / 2, m["x"] + w / 2, str(m["name"]), bool(m.get("focused"))))
+        except (KeyError, TypeError, ValueError, ZeroDivisionError):
+            continue
+    here = next((sc for sc in screens if sc[3]), None)
+    if here is None:
+        return None
+    wx, wy = {"left": (-1, 0), "right": (1, 0), "up": (0, -1), "down": (0, 1)}[direction]
+    best: tuple[float, str] | None = None
+    for cy, cx, name, _ in screens:
+        dx, dy = cx - here[1], cy - here[0]
+        along, across = dx * wx + dy * wy, abs(dx * wy) + abs(dy * wx)
+        if along > 0 and along >= across and (best is None or dx * dx + dy * dy < best[0]):
+            best = (dx * dx + dy * dy, name)
+    if best is not None:
+        return best[1]
+    if direction in ("left", "right") and len(screens) > 1:
+        order = sorted(screens)
+        return order[(order.index(here) + (1 if direction == "right" else -1)) % len(order)][2]
+    return None
+
+
+@dataclass(frozen=True)
+class screen:
+    """Focus the screen that way, by name, from where the screens stand (screen_toward). Hyprland's
+    own direction ("l", "u") finds only a screen whose edge touches that side
+    (MonitorQueryCore::directionLookup, v0.56.2): with three screens stacked in a column, left and
+    right never moved (a user's first run, 2026-10-29). A monitor is found only when a dispatcher runs,
+    so the probe builds one for "current", and a direction with no screen is a tick in the hand."""
+
+    direction: str
+
+    def __call__(self, pad: "Pad", press: Press) -> None:
+        name = screen_toward(pad.hypr.json("monitors"), self.direction)
+        if name is None:
+            pad.fx.rumble("tick")
+            return
+        pad.hypr.dispatch(f'hl.dsp.focus({{ monitor = "{name}" }})')
+
+    @property
+    def probes(self) -> list[str]:
+        return ['local _ = hl.dsp.focus({ monitor = "current" })']
+
+
+@dataclass(frozen=True)
+class Key:
+    """One chord for one window, through Hyprland's send_shortcut: Hyprland gives the window keyboard
+    focus, the chord, and focus back, in one call (Actions::pass, ConfigActions.cpp, v0.56.2). No
+    uinput, and no modifier is left down. Probe 2026-10-29: Alt+Right sent this way to an unfocused
+    herdr window switched its tab, and the focused window stayed focused."""
+
+    mods: str  # "", "ALT", "CTRL SHIFT"
+    key: str   # an xkb keysym name: Return, Escape, Up, Tab, bracketleft
+
+    def expr(self, address: str) -> str:
+        return f'hl.dsp.send_shortcut({{ mods = "{self.mods}", key = "{self.key}", window = "address:{address}" }})'
+
+
+def chord(mods: str, key: str) -> tuple[Key, ...]:
+    return (Key(mods, key),)
+
+
+Step = tuple[Key, ...] | str  # chords in order (herdr's prefix, then its key), or a dispatcher
+
+
+@dataclass(frozen=True)
+class keys:
+    """An action whose keys depend on the window it was pressed in: `by_kind` maps a window kind to its
+    step; "group" serves a window in a Hyprland group whose kind has no step; "*" serves any window."""
+
+    by_kind: dict[str, Step]
+
+    def step_for(self, window: Window) -> Step | None:
+        if window.kind in self.by_kind:
+            return self.by_kind[window.kind]
+        if window.grouped > 1 and "group" in self.by_kind:
+            return self.by_kind["group"]
+        return self.by_kind.get("*")
+
+    def __call__(self, pad: "Pad", press: Press) -> None:
+        if press.window is None:
+            return
+        step = self.step_for(press.window)
+        if isinstance(step, str):
+            pad.hypr.dispatch(step)
+            return
+        for key in step or ():
+            if not pad.hypr.dispatch(key.expr(press.window.address)):
+                break
+
+    @property
+    def probes(self) -> list[str]:
+        # address 0x0 is never a window, and building a dispatcher runs nothing anyway
+        return [f"local _ = {k.expr('0x0') if isinstance(k, Key) else k}" for step in self.by_kind.values()
+                for k in ([step] if isinstance(step, str) else step)]
+
+    @property
+    def keysyms(self) -> list[str]:
+        return [k.key for step in self.by_kind.values() if not isinstance(step, str) for k in step]
+
+
+# Workspaces on this screen are omaspaces' when it is loaded (~/.config/hypr/split-workspaces.lua:
+# 11-19 on one screen, 21-29 on the next, ...). Its focus_relative steps through the ones in use plus
+# one empty, as the keyboard's workspace keys do; without it, Hyprland's own next workspace on this
+# monitor.
+STEP_WORKSPACE = (
+    'local s = package.loaded["omaspaces.split"] '
+    'if s then s.focus_relative({delta}) else hl.dispatch(hl.dsp.focus({{ workspace = "m{delta:+d}" }})) end'
+)
+STEP_PROBE = (
+    'local s = package.loaded["omaspaces.split"] '
+    'if s and type(s.focus_relative) ~= "function" then error("omaspaces.split has no focus_relative") end '
+    'local _ = hl.dsp.focus({ workspace = "m+1" })'
+)
+
+def spawn(*argv: str) -> Callable[["Pad", Press], None]:
+    def run(pad: "Pad", press: Press) -> None:
+        pad.fx.rumble("tick")
+        pad.runner.spawn(list(argv))
+    return run
+
+
+ACTIONS: dict[str, Action] = {
+    "talk": Action("Hold to talk, let go to paste; a tap keeps listening",
+                   lambda pad, press: pad.talk.press(), release=lambda pad, press: pad.talk.release()),
+    # The mic button: a press and an instant let-go, which Talk reads as a tap (it keeps listening);
+    # the next press ends it and pastes.
+    "talk_toggle": Action("Talk: a press starts, the next press pastes",
+                          lambda pad, press: (pad.talk.press(), pad.talk.release())),
+    "ideas": Action("Voice ideas listener on / off", spawn("voice-ideas-toggle")),
+    "jump": Action("Show the agent that waits on you; again: the next", lambda pad, press: pad.jump.press()),
+    "map": Action("Held: this map. Tapped: it stays up until the next tap",
+                  lambda pad, press: pad.map.press(press.window.kind if press.window else "other", press.layer,
+                                                   bool(press.window and press.window.grouped > 1)),
+                  window=True, release=lambda pad, press: pad.map.release()),
+    # The Sun board's own key (Super+Ctrl+Shift+Return): raise its one window, or open it.
+    "board": Action("Tap: the Sun board. Hold: the sessions wheel (right stick aims, let go jumps)",
+                    dispatch("hl.dsp.exec_cmd([[omarchy-launch-or-focus-webapp 'Sun board' 'http://127.0.0.1:7741/']])"),
+                    tap=True, hold=lambda pad, press: pad.sessions.open(),
+                    release=lambda pad, press: pad.sessions.release()),
+    "enter": Action("Enter: send, confirm", keys({"*": chord("", "Return")}), window=True),
+    "escape": Action("Esc: back, stop the agent", keys({"*": chord("", "Escape")}), window=True),
+    "mode": Action("Shift+Tab: the agent's mode", keys({"*": chord("SHIFT", "Tab")}), window=True),
+    "arrow_up": Action("Up", keys({"*": chord("", "Up")}), "fast", window=True),
+    "arrow_down": Action("Down", keys({"*": chord("", "Down")}), "fast", window=True),
+    "arrow_left": Action("Left", keys({"*": chord("", "Left")}), "fast", window=True),
+    "arrow_right": Action("Right", keys({"*": chord("", "Right")}), "fast", window=True),
+    # Take back: Ctrl+W deletes the word before the cursor in Claude Code's input (2.1.312: a
+    # pasted dictation Claude folded into "[Pasted text #1]" goes in one), readline and herdr (which
+    # binds no Ctrl+W); a browser's Ctrl+W would close the tab, so the rest get Ctrl+Backspace. It is
+    # never Esc or Ctrl+C, the keys that stop a running agent (measured in a scratch Claude, s2).
+    "take_back": Action("Take back the last word; hold to keep deleting",
+                        keys({"herdr": chord("CTRL", "w"), "terminal": chord("CTRL", "w"),
+                              "*": chord("CTRL", "BackSpace")}), "words", window=True),
+    # Text size: Ctrl+= / Ctrl+- / Ctrl+0 are foot's font keys (the herdr windows are foot) and the
+    # browsers' zoom keys.
+    "size_up": Action("Bigger text", keys({"*": chord("CTRL", "equal")}), "slow", window=True),
+    "size_down": Action("Smaller text", keys({"*": chord("CTRL", "minus")}), "slow", window=True),
+    "size_normal": Action("Normal text size", keys({"*": chord("CTRL", "0")}), window=True),
+    # herdr's own chords (~/.config/herdr/config.toml): Alt+Left/Right tab,
+    # Alt+Up/Down workspace (a "space"), Alt+Shift+Up/Down agent. The board's:
+    # [ ] tab, Alt+Up/Down agent, Tab / Shift+Tab tile (keys.js).
+    "tab_prev": Action("Previous tab", keys({"herdr": chord("ALT", "Left"), "browser": chord("CTRL SHIFT", "Tab"),
+                                             "board": chord("", "bracketleft"), "group": "hl.dsp.group.prev()"}),
+                       "slow", window=True, labels={"herdr": "Previous herdr tab", "browser": "Previous browser tab",
+                                                    "board": "Previous board tab", "group": "Previous tab of the group"}),
+    "tab_next": Action("Next tab", keys({"herdr": chord("ALT", "Right"), "browser": chord("CTRL", "Tab"),
+                                         "board": chord("", "bracketright"), "group": "hl.dsp.group.next()"}),
+                       "slow", window=True, labels={"herdr": "Next herdr tab", "browser": "Next browser tab",
+                                                    "board": "Next board tab", "group": "Next tab of the group"}),
+    "agent_prev": Action("Previous agent", keys({"herdr": chord("ALT SHIFT", "Up"), "board": chord("ALT", "Up")}),
+                         "slow", window=True),
+    "agent_next": Action("Next agent", keys({"herdr": chord("ALT SHIFT", "Down"), "board": chord("ALT", "Down")}),
+                         "slow", window=True),
+    "space_prev": Action("Previous herdr space; browser back", keys({"herdr": chord("ALT", "Up"), "browser": chord("ALT", "Left"),
+                                                                     "board": chord("SHIFT", "Tab")}),
+                         "slow", window=True, labels={"herdr": "Previous herdr space", "browser": "Back",
+                                                      "board": "The tile before"}),
+    "space_next": Action("Next herdr space; browser forward", keys({"herdr": chord("ALT", "Down"), "browser": chord("ALT", "Right"),
+                                                                    "board": chord("", "Tab")}),
+                         "slow", window=True, labels={"herdr": "Next herdr space", "browser": "Forward",
+                                                      "board": "The tile after"}),
+    "focus_left": Action("Focus the window to the left", dispatch('hl.dsp.focus({ direction = "l" })'), "slow"),
+    "focus_right": Action("Focus the window to the right", dispatch('hl.dsp.focus({ direction = "r" })'), "slow"),
+    "focus_up": Action("Focus the window above", dispatch('hl.dsp.focus({ direction = "u" })'), "slow"),
+    "focus_down": Action("Focus the window below", dispatch('hl.dsp.focus({ direction = "d" })'), "slow"),
+    "workspace_prev": Action("Previous workspace on this screen", evaluate(STEP_WORKSPACE.format(delta=-1), STEP_PROBE), "slow"),
+    "workspace_next": Action("Next workspace on this screen", evaluate(STEP_WORKSPACE.format(delta=1), STEP_PROBE), "slow"),
+    "screen_left": Action("Focus the screen to the left, or the one before", screen("left")),
+    "screen_right": Action("Focus the screen to the right, or the one after", screen("right")),
+    "screen_up": Action("Focus the screen above", screen("up")),
+    "screen_down": Action("Focus the screen below", screen("down")),
+    "fullscreen": Action("Full screen on / off", dispatch('hl.dsp.window.fullscreen({ mode = "fullscreen" })')),
+    "workspace_back": Action("Back to the workspace before", dispatch('hl.dsp.focus({ workspace = "previous" })')),
+    "window_next": Action("Next window on this workspace", dispatch("hl.dsp.window.cycle_next()"), "slow"),
+    "scratchpad": Action("Scratchpad on / off", dispatch('hl.dsp.workspace.toggle_special("scratchpad")')),
+}
+
+# Control -> action, per layer. "ls_<dir>" is a left-stick flick, "rs_<dir>" a right-stick flick
+# (the world layer's; inside the window the right stick scrolls). L2 itself switches the layer.
+LAYOUT: dict[str, dict[str, str]] = {
+    "base": {
+        "cross": "enter", "circle": "escape", "square": "take_back", "l3": "mode",
+        "up": "arrow_up", "down": "arrow_down", "left": "arrow_left", "right": "arrow_right",
+        "l1": "tab_prev", "r1": "tab_next",
+        "ls_up": "agent_prev", "ls_down": "agent_next", "ls_left": "space_prev", "ls_right": "space_next",
+        "r3": "size_normal", "r2": "talk", "create": "ideas", "triangle": "jump", "ps": "board", "options": "map",
+        "mic": "talk_toggle",
+    },
+    "world": {
+        "up": "focus_up", "down": "focus_down", "left": "focus_left", "right": "focus_right",
+        "l1": "workspace_prev", "r1": "workspace_next",
+        "ls_up": "screen_up", "ls_down": "screen_down", "ls_left": "screen_left", "ls_right": "screen_right",
+        "rs_up": "size_up", "rs_down": "size_down", "r3": "size_normal",
+        "cross": "fullscreen", "circle": "workspace_back", "square": "window_next", "triangle": "scratchpad",
+        "r2": "talk", "create": "ideas", "ps": "board", "options": "map", "mic": "talk_toggle",
+    },
+}
+LAYER_NAMES = {"base": "Inside the window", "world": "L2 held: the desktop"}
+CONTROL_NAMES = {
+    "rstick": "Right stick", "chord": "PS + Options", "mic": "Mic button",
+    "up": "D-pad up", "down": "D-pad down", "left": "D-pad left", "right": "D-pad right",
+    "ls_up": "Left stick up", "ls_down": "Left stick down", "ls_left": "Left stick left", "ls_right": "Left stick right",
+    "rs_up": "Right stick up", "rs_down": "Right stick down",
+    "cross": "Cross", "circle": "Circle", "square": "Square", "triangle": "Triangle",
+    "l1": "L1", "r1": "R1", "l2": "L2", "r2": "R2", "l3": "L3", "r3": "R3",
+    "ps": "PS", "options": "Options", "create": "Create",
+}
+
+
+# --- The pad, as events in and actions out --------------------------------------------------------
+
+def flick(x: float, y: float, current: str | None) -> str | None:
+    """The left stick read as a D-pad: its dominant direction, with hysteresis."""
+    if abs(x) >= abs(y):
+        direction, tilt = ("right" if x > 0 else "left"), abs(x)
+    else:
+        direction, tilt = ("down" if y > 0 else "up"), abs(y)
+    if current is None:
+        return direction if tilt >= FLICK_ON else None
+    if tilt < FLICK_OFF:
+        return None
+    return direction if direction != current and tilt >= FLICK_ON else current
+
+
+class Pad:
+    """Turns the pad's events into actions. Pure apart from what it is handed (Hyprland, Fx, the
+    clock), so the tests drive it with recorded events."""
+
+    def __init__(self, hypr: Hypr, fx: Fx, clock: Callable[[], float] = time.monotonic,
+                 windows: Windows | None = None, runner: Runner | None = None, voice: Path | None = None,
+                 wheel: Wheel | None = None, mode: str = "desk", lights: Lights | None = None):
+        self.hypr, self.fx, self.clock = hypr, fx, clock
+        self.windows = windows or Windows(hypr)
+        self.runner = runner or Runner()
+        self.talk = Talk(self.runner, fx, clock, voice or voice_dir())
+        self.jump = Jump(self.runner, fx, clock)
+        self.scroll = Scroll(hypr, wheel or Wheel(), clock)
+        self.sessions = SessionsWheel(hypr, fx, clock)
+        self.map = PadMap(hypr, clock)
+        self.mode = mode          # desk: the pad drives the desktop (grabbed); game: a game has it
+        self.buttons: set[str] = set()
+        self.lights = lights or Lights()
+        self.lit_color: tuple[int, int, int] | None = None
+        self.lit_screen: int | None = None
+        self.screen_at = float("-inf")
+        self.world = False
+        self.held: dict[str, Press] = {}
+        self.hat = {ABS_HAT0X: 0, ABS_HAT0Y: 0}
+        self.stick = {"left": [0.0, 0.0], "right": [0.0, 0.0]}
+        self.flicked: str | None = None
+        self.rflicked: str | None = None   # the right stick's flick, in the world layer
+
+    def feed(self, etype: int, code: int, value: int) -> None:
+        if etype == EV_KEY:
+            name = BUTTONS.get(code)
+            if name is None or value == 2:  # 2 is the kernel's autorepeat; repeats are ours
+                return
+            if value:
+                self.buttons.add(name)
+            else:
+                self.buttons.discard(name)
+            if value and name in GAME_CHORD and GAME_CHORD <= self.buttons:
+                self.toggle_mode()
+                return
+            if self.mode == "game":
+                return
+            if value:
+                self.press(name)
+            else:
+                self.release(name)
+        elif etype == EV_ABS:
+            if self.mode == "game":
+                self.seed(code, value)  # where the sticks are, for the way back; nothing acts
+                return
+            if code in self.hat:
+                self.on_hat(code, value)
+            elif code in STICKS:
+                side, axis = STICKS[code]
+                self.stick[side][axis] = max(-1.0, min(1.0, (value - 128) / 127))
+                if side == "left":
+                    self.on_flick(flick(*self.stick["left"], self.flicked))
+                elif self.sessions.token is not None:
+                    self.sessions.aim(*self.stick["right"])  # the wheel is open: the stick aims, never scrolls
+                    self.scroll.pause()
+                elif self.world:
+                    self.on_rflick(flick(*self.stick["right"], self.rflicked))  # L2 held: text size
+                else:
+                    self.scroll.stick(*self.stick["right"])
+
+    def resync(self, down: set[int], axes: dict[int, int]) -> None:
+        """Set the Pad from the pad's real state after the kernel dropped events: a button let go in
+        the drop is released, one still down is pressed, the axes take their places."""
+        for code, name in BUTTONS.items():
+            if (code in down) != (name in self.buttons):
+                self.feed(EV_KEY, code, 1 if code in down else 0)
+        for code, value in axes.items():
+            self.feed(EV_ABS, code, value)
+
+    def button(self, name: str, down: bool) -> None:
+        """A button read outside evdev (the mic button, from the raw reports)."""
+        if self.mode == "game":
+            return
+        if down:
+            self.press(name)
+        else:
+            self.release(name)
+
+    def seed(self, code: int, value: int) -> None:
+        """Where an axis already is when the pad appears: remembered, never pressed."""
+        if code in self.hat:
+            self.hat[code] = value
+        elif code in STICKS:
+            side, axis = STICKS[code]
+            self.stick[side][axis] = max(-1.0, min(1.0, (value - 128) / 127))
+
+    def on_hat(self, code: int, value: int) -> None:
+        low, high = ("left", "right") if code == ABS_HAT0X else ("up", "down")
+        old, self.hat[code] = self.hat[code], value
+        if old == value:
+            return
+        if old:
+            self.release(low if old < 0 else high)
+        if value:
+            self.press(low if value < 0 else high)
+
+    def on_rflick(self, direction: str | None) -> None:
+        old, self.rflicked = self.rflicked, direction
+        if old == direction:
+            return
+        if old:
+            self.release(f"rs_{old}")
+        if direction:
+            self.press(f"rs_{direction}")
+
+    def on_flick(self, direction: str | None) -> None:
+        old, self.flicked = self.flicked, direction
+        if old == direction:
+            return
+        if old:
+            self.release(f"ls_{old}")
+        if direction:
+            self.press(f"ls_{direction}")
+
+    def press(self, control: str) -> None:
+        if control == LAYER_KEY:
+            self.world = True
+            self.fx.rumble("click")
+            self.map.layer("world")
+            # The right stick changes text size now, not scroll: a scroll stops, and a tilt already
+            # held counts as flicked, so it sizes nothing until the stick has come back.
+            self.scroll.pause()
+            self.rflicked = flick(*self.stick["right"], None)
+            return
+        if control == "circle" and (self.talk.drop() or self.sessions.cancel()):
+            return  # Circle while talking drops the recording, with the wheel open closes it; not Esc
+        layer = "world" if self.world else "base"
+        name = LAYOUT[layer].get(control)
+        if name is None:
+            return
+        action = ACTIONS[name]
+        press = Press(control, layer, action, self.windows.active() if action.window else None, started=self.clock())
+        if action.repeat:
+            press.next_at = self.clock() + REPEAT[action.repeat][0]
+        self.held[control] = press
+        if not action.tap:
+            self.run(press)
+
+    def release(self, control: str) -> None:
+        if control == LAYER_KEY:
+            self.world = False
+            self.map.layer("base")
+            if self.rflicked:
+                self.held.pop(f"rs_{self.rflicked}", None)  # a text size held on the stick stops with L2
+            self.rflicked = None
+            # The stick scrolls again: at once when it rests, else once it has come back to rest.
+            self.scroll.pause()
+            self.scroll.stick(*self.stick["right"])
+            return
+        press = self.held.pop(control, None)
+        if press is not None and press.action.tap and not press.hold_fired and self.clock() - press.started < TAP_S:
+            self.run(press)
+        if press is not None and press.action.release is not None:
+            try:
+                press.action.release(self, press)
+            except Exception:
+                log.exception("%s (let go) failed", press.action.label)
+
+    def tick(self) -> None:
+        self.talk.tick()
+        self.jump.tick()
+        self.scroll.tick()
+        self.show_lights()
+        self.sessions.flush()
+        self.runner.reap()
+        now = self.clock()
+        for press in list(self.held.values()):
+            if press.action.hold and not press.hold_fired and now - press.started >= TAP_S:
+                press.hold_fired = True
+                try:
+                    press.action.hold(self, press)
+                except Exception:
+                    log.exception("%s (held) failed", press.action.label)
+            if press.next_at is not None and now >= press.next_at:
+                press.next_at = now + repeat_gap(press.action.repeat, now - press.started)
+                self.run(press)
+
+    def run(self, press: Press) -> None:
+        log.debug("%s %s -> %s", press.layer, press.control, press.action.label)
+        try:
+            press.action.run(self, press)
+        except Exception:  # one bad action must never take the pad away
+            log.exception("%s failed", press.action.label)
+
+    def light_state(self) -> str:
+        if self.mode == "game":
+            return "game"
+        if self.talk.active():
+            return "talk"
+        return "world" if self.world else "desk"
+
+    def show_lights(self) -> None:
+        """The lightbar follows the state on every tick; the player lights follow the focused screen,
+        read twice a second (any mouse or key can move it). Each is written only when it changes."""
+        color = LIGHT[self.light_state()]
+        if color != self.lit_color:
+            self.lit_color = color
+            self.lights.color(color)
+        now = self.clock()
+        if now - self.screen_at >= SCREEN_EVERY_S:
+            self.screen_at = now
+            screen = focused_screen(self.hypr)
+            if screen is not None and screen != self.lit_screen:
+                self.lit_screen = screen
+                self.lights.players(PLAYERS.get(screen, ()))
+
+    def toggle_mode(self) -> None:
+        """PS + Options: the pad goes to a game, or comes back. Whatever the first of the two buttons
+        started (the map, the wheel) closes, and nothing is left held."""
+        self.quiet()
+        if self.mode == "desk":
+            self.mode = "game"
+            self.fx.rumble("long")
+            self.fx.notify("Game mode", "The pad is the game's. PS + Options brings it back.")
+        else:
+            self.mode = "desk"
+            self.fx.rumble("double")
+            self.fx.notify("Desk mode", "The pad drives the desktop again.")
+        log.info("%s mode", self.mode)
+
+    def quiet(self) -> None:
+        """Let go of everything the pad holds: a talk is dropped, the wheel and the map close."""
+        self.talk.drop()  # a talk that nobody let go of is never pasted
+        self.sessions.cancel()
+        self.map.hide()
+        self.scroll.reset()
+        self.held.clear()  # no release actions: their buttons are now the chord's or gone
+        self.world = False
+        self.rflicked = None
+
+    def reset(self) -> None:
+        """The pad went away: let go of everything it held. The mode stays for its return."""
+        self.talk.reset()
+        self.jump.reset()
+        self.scroll.reset()
+        self.sessions.cancel()
+        self.map.hide()
+        for control in list(self.held):
+            self.held.pop(control)  # no release actions: a lost pad lets go of nothing on purpose
+        self.buttons.clear()
+        self.world = False
+        self.hat = {ABS_HAT0X: 0, ABS_HAT0Y: 0}
+        self.stick = {"left": [0.0, 0.0], "right": [0.0, 0.0]}
+        self.flicked = None
+        self.rflicked = None
+
+
+# --- The shell: the real pad ----------------------------------------------------------------------
+
+RUMBLE = {  # pattern -> (milliseconds, strong motor, weak motor)
+    "click": (25, 0x0000, 0x5000),
+    "tick": (60, 0x2000, 0x5000),
+    "long": (320, 0x6000, 0x6000),
+}
+
+
+class Motors(Fx):
+    """The pad's rumble motors and desktop notifications."""
+
+    def __init__(self, dev: Any, dry: bool = False):
+        self.dev, self.dry = dev, dry  # dry: notifications are printed, never shown on the screen
+        self.effects: dict[str, int] = {}
+        self.later: list[tuple[float, str]] = []
+        self.children: list[subprocess.Popen[bytes]] = []
+
+    def rumble(self, pattern: str) -> None:
+        if pattern == "double":
+            self.play("tick")
+            self.later.append((time.monotonic() + 0.13, "tick"))
+            return
+        self.play(pattern)
+
+    def play(self, pattern: str) -> None:
+        from evdev import ecodes, ff
+
+        try:
+            if pattern not in self.effects:
+                ms, strong, weak = RUMBLE[pattern]
+                effect = ff.Effect(ecodes.FF_RUMBLE, -1, 0, ff.Trigger(0, 0), ff.Replay(ms, 0),
+                                   ff.EffectType(ff_rumble_effect=ff.Rumble(strong, weak)))
+                self.effects[pattern] = self.dev.upload_effect(effect)
+            self.dev.write(ecodes.EV_FF, self.effects[pattern], 1)
+        except OSError as exc:
+            log.info("rumble %s: %s", pattern, exc)
+
+    def notify(self, title: str, body: str = "") -> None:
+        if self.dry:
+            print(f"dry: notify {title}: {body}", flush=True)
+            return
+        # Omarchy's action app (omarchy-notification-send's default): the shell shows its notes in Do
+        # Not Disturb, as they answer a press (shown, they reach the history like any other).
+        argv = ["notify-send", "-a", "omarchy-action", "-t", "2500",
+                "-h", "string:x-canonical-private-synchronous:hypr-gamepad", title, body]
+        try:
+            self.children.append(subprocess.Popen(argv, stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL,
+                                                  stderr=subprocess.DEVNULL))
+        except OSError as exc:
+            log.info("notify: %s", exc)
+
+    def pump(self, now: float) -> None:
+        due = [p for at, p in self.later if at <= now]
+        self.later = [(at, p) for at, p in self.later if at > now]
+        for pattern in due:
+            self.play(pattern)
+        self.children = [c for c in self.children if c.poll() is None]
+
+
+class UinputWheel(Wheel):
+    """A virtual mouse that only scrolls: hi-res wheel events (REL_WHEEL_HI_RES, 120 a notch) for a
+    smooth scroll, and the classic notches for programs that read only those. It has the usual mouse
+    axes and buttons so libinput takes it as a pointer; it never sends them."""
+
+    NAME = "hypr-gamepad wheel"
+
+    def __init__(self) -> None:
+        from evdev import UInput, ecodes
+
+        self.ecodes = ecodes
+        caps = {ecodes.EV_REL: [ecodes.REL_X, ecodes.REL_Y, ecodes.REL_WHEEL, ecodes.REL_HWHEEL,
+                                ecodes.REL_WHEEL_HI_RES, ecodes.REL_HWHEEL_HI_RES],
+                ecodes.EV_KEY: [ecodes.BTN_LEFT, ecodes.BTN_RIGHT, ecodes.BTN_MIDDLE]}
+        self.ui = UInput(caps, name=self.NAME)
+
+    def scroll(self, vertical: int, horizontal: int, notches_v: int, notches_h: int) -> None:
+        e = self.ecodes
+        for code, value in ((e.REL_WHEEL_HI_RES, vertical), (e.REL_HWHEEL_HI_RES, horizontal),
+                            (e.REL_WHEEL, notches_v), (e.REL_HWHEEL, notches_h)):
+            if value:
+                self.ui.write(e.EV_REL, code, value)
+        if vertical or horizontal or notches_v or notches_h:
+            self.ui.syn()
+
+
+class DryWheel(Wheel):
+    """--dry: one line per scroll gesture, its total."""
+
+    def __init__(self) -> None:
+        self.total = [0, 0]
+
+    def scroll(self, vertical: int, horizontal: int, notches_v: int, notches_h: int) -> None:
+        if not (vertical or horizontal or notches_v or notches_h):
+            if any(self.total):
+                print(f"dry: scrolled {self.total[0]} up, {self.total[1]} right (hi-res, 120 a notch)", flush=True)
+            self.total = [0, 0]
+            return
+        self.total[0] += vertical
+        self.total[1] += horizontal
+
+
+def make_wheel(dry: bool) -> Wheel:
+    if dry:
+        return DryWheel()
+    try:
+        return UinputWheel()
+    except (OSError, ImportError) as exc:
+        log.info("no scroll: the virtual wheel could not be made (%s)", exc)
+        return Wheel()
+
+
+class SysfsLights(Lights):
+    """The pad's LED class files (hid-playstation): <input>:rgb:indicator and <input>:white:player-N.
+    Writable with the udev rule; without it the first write fails, is logged once, and the lights stay
+    as the kernel set them."""
+
+    def __init__(self, input_dir: str):
+        name = Path(input_dir).name  # inputNNN, the pad's input device
+        self.rgb = Path("/sys/class/leds", f"{name}:rgb:indicator")
+        self.player = [Path("/sys/class/leds", f"{name}:white:player-{n}") for n in range(1, 6)]
+        self.broken = False
+
+    def write(self, path: Path, value: str) -> None:
+        if self.broken:
+            return
+        try:
+            path.write_text(value)
+        except OSError as exc:
+            self.broken = True
+            log.info("no lights: %s (the udev rule is not installed?)", exc)
+
+    def color(self, rgb: tuple[int, int, int]) -> None:
+        self.write(self.rgb / "multi_intensity", " ".join(map(str, rgb)))
+        self.write(self.rgb / "brightness", "255")
+
+    def players(self, lit: tuple[int, ...]) -> None:
+        for n, path in enumerate(self.player, start=1):
+            self.write(path / "brightness", "1" if n in lit else "0")
+
+
+class DryLights(Lights):
+    def color(self, rgb: tuple[int, int, int]) -> None:
+        print(f"dry: lightbar {rgb[0]} {rgb[1]} {rgb[2]}", flush=True)
+
+    def players(self, lit: tuple[int, ...]) -> None:
+        print(f"dry: player lights {' '.join(map(str, lit)) or 'off'}", flush=True)
+
+
+MIC_BIT = 0x04  # buttons[2] bit 2 in the DualSense input report (hid-playstation DS_BUTTONS2_MIC_MUTE)
+
+
+def mic_down(report: bytes) -> bool | None:
+    """Whether the mic button is down in one raw report; None for a report that is not an input one.
+    Bluetooth 0x31 carries the input struct from byte 2, USB 0x01 from byte 1; its buttons start at
+    the 8th byte of it (x, y, rx, ry, z, rz, seq; read on a test machine: sticks at 2-5 matched evdev's)."""
+    if len(report) >= 12 and report[0] == 0x31:
+        return bool(report[2 + 9] & MIC_BIT)
+    if len(report) >= 11 and report[0] == 0x01:
+        return bool(report[1 + 9] & MIC_BIT)
+    return None
+
+
+class MicReader:
+    """The pad's hidraw node, read only for the mic button. Absent or unreadable (no udev rule): None."""
+
+    def __init__(self, input_dir: str):
+        self.fd: int | None = None
+        self.down = False
+        hid = Path(input_dir, "device")
+        for node in sorted(hid.glob("hidraw/hidraw*")):
+            try:
+                self.fd = os.open(f"/dev/{node.name}", os.O_RDONLY | os.O_NONBLOCK)
+                log.info("mic button from /dev/%s", node.name)
+            except OSError as exc:
+                log.info("no mic button: /dev/%s: %s (the udev rule is not installed?)", node.name, exc)
+            break
+
+    def read(self, pad: Pad) -> None:
+        if self.fd is None:
+            return
+        while True:
+            try:
+                report = os.read(self.fd, 128)
+            except BlockingIOError:
+                return
+            except OSError:
+                self.close()
+                return
+            down = mic_down(report)
+            if down is not None and down != self.down:
+                self.down = down
+                pad.button("mic", down)
+
+    def close(self) -> None:
+        if self.fd is not None:
+            try:
+                os.close(self.fd)
+            except OSError:
+                pass
+        self.fd = None
+
+
+def find_pad(path: str | None = None) -> Any:
+    import evdev
+
+    for candidate in [path] if path else evdev.list_devices():
+        try:
+            dev = evdev.InputDevice(candidate)
+        except OSError:
+            continue
+        if dev.name in PAD_NAMES:
+            return dev
+        dev.close()
+    return None
+
+
+def battery(mac: str) -> str:
+    base = BATTERY.format(mac=mac.lower())
+    try:
+        level = Path(base, "capacity").read_text().strip()
+        state = Path(base, "status").read_text().strip()
+    except OSError:
+        return "unknown"
+    return f"{level}% {state.lower()}"
+
+
+def input_dir(dev: Any) -> str:
+    """/sys/class/input/eventN/device: the pad's inputNNN, whose LEDs and hidraw node are siblings."""
+    return os.path.realpath(f"/sys/class/input/{os.path.basename(dev.path)}/device")
+
+
+def serve(dev: Any, pad: Pad, motors: Motors, mic: MicReader | None = None) -> None:
+    for code in AXES:
+        info = dev.absinfo(code)
+        if info is not None:
+            pad.seed(code, int(info.value))
+    grab = Grabber(dev, motors)
+    grab.sync(pad.mode == "desk")
+    reader = EventReader(dev, pad)
+    os.set_blocking(dev.fd, False)
+    while True:
+        fds = [dev.fd] + ([mic.fd] if mic is not None and mic.fd is not None else [])
+        ready, _, _ = select.select(fds, [], [], TICK_S)
+        if mic is not None and mic.fd in ready:
+            mic.read(pad)
+        if dev.fd in ready:
+            reader.read()
+        pad.tick()
+        motors.pump(time.monotonic())
+        grab.sync(pad.mode == "desk")
+
+
+class EventReader:
+    """The pad's events into the Pad. When the kernel drops events (SYN_DROPPED: its buffer filled while
+    the loop was busy), everything up to the next report is skipped and the Pad is set from the pad's
+    real state instead, so a release lost in the drop still lets go (independent review, 2026-10-29)."""
+
+    def __init__(self, dev: Any, pad: Pad):
+        self.dev, self.pad = dev, pad
+        self.dropping = False
+
+    def read(self) -> None:
+        try:
+            events = list(self.dev.read())
+        except BlockingIOError:
+            return
+        for event in events:
+            if event.type == EV_SYN:
+                if event.code == SYN_DROPPED:
+                    self.dropping = True
+                elif event.code == SYN_REPORT and self.dropping:
+                    self.dropping = False
+                    self.resync()
+                continue
+            if not self.dropping:
+                self.pad.feed(event.type, event.code, event.value)
+
+    def resync(self) -> None:
+        log.info("events dropped: the pad's state read again")
+        axes = {}
+        for code in AXES:
+            info = self.dev.absinfo(code)
+            if info is not None:
+                axes[code] = int(info.value)
+        self.pad.resync(set(self.dev.active_keys()), axes)
+
+
+class Grabber:
+    """Holds the pad in desk mode, lets go in game mode. A grab another program blocks (it holds the
+    pad itself, so hypr-gamepad reads nothing meanwhile) is tried again each second and said once."""
+
+    RETRY_S = 1.0
+
+    def __init__(self, dev: Any, fx: Fx, clock: Callable[[], float] = time.monotonic):
+        self.dev, self.fx, self.clock = dev, fx, clock
+        self.have = False
+        self.blocked = False
+        self.next_try = float("-inf")
+
+    def sync(self, want: bool) -> None:
+        if want == self.have:
+            return
+        now = self.clock()
+        if now < self.next_try:
+            return
+        try:
+            if want:
+                self.dev.grab()
+            else:
+                self.dev.ungrab()
+        except OSError as exc:
+            self.next_try = now + self.RETRY_S
+            if not self.blocked:
+                self.blocked = True
+                log.info("cannot %s %s: %s; trying each second", "grab" if want else "let go of", self.dev.path, exc)
+                self.fx.notify("Pad", "Another program holds the pad. Close it, and the pad comes back here.")
+            return
+        self.blocked = False
+        self.have = want
+        log.info("%s %s at %s", "grabbed" if want else "let go of", self.dev.name, self.dev.path)
+
+
+def run_daemon(dry: bool, device: str | None) -> None:
+    hypr: Hypr = DryHypr() if dry else Hypr()
+    wheel = make_wheel(dry)  # one virtual wheel for the daemon's life, across pad reconnects
+    mode = "desk"            # and one mode: a pad that sleeps mid-game comes back to the game
+    waiting = False
+    while True:
+        dev = find_pad(device)
+        if dev is None:
+            if not waiting:
+                log.info("waiting for the pad")
+            waiting = True
+            time.sleep(1.0)
+            continue
+        waiting = False
+        motors = Motors(dev, dry=dry)
+        where = input_dir(dev)
+        lights: Lights = DryLights() if dry else SysfsLights(where)
+        mic = MicReader(where)
+        pad = Pad(hypr, motors, runner=DryRunner() if dry else None, wheel=wheel, mode=mode, lights=lights)
+        way_in = ("Game mode: the pad is the game's. PS + Options brings it back." if mode == "game"
+                  else "Hold L2 for the desktop.")
+        motors.notify("DualSense ready", f"Battery {battery(dev.uniq or '')}. {way_in}")
+        try:
+            serve(dev, pad, motors, mic)
+        except OSError as exc:
+            log.info("pad gone: %s", exc)
+        finally:
+            pad.reset()
+            mic.close()
+            mode = pad.mode
+            try:
+                dev.close()
+            except OSError:
+                pass
+        time.sleep(0.5)
+
+
+# The map's order, by where a control sits on the pad.
+MAP_GROUPS = [
+    ("Buttons", ["cross", "circle", "square", "triangle"]),
+    ("D-pad", ["up", "down", "left", "right"]),
+    ("Shoulders", ["l1", "r1", "l2", "r2"]),
+    ("Sticks", ["ls_up", "ls_down", "ls_left", "ls_right", "l3", "rstick", "rs_up", "rs_down", "r3"]),
+    ("Middle", ["ps", "options", "create", "mic", "chord"]),
+]
+# The pad's own marks for the face buttons and the D-pad (escapes keep this file ASCII).
+GLYPHS = {"cross": "\u2715", "circle": "\u25cb", "square": "\u25a1", "triangle": "\u25b3",
+          "up": "\u2191", "down": "\u2193", "left": "\u2190", "right": "\u2192",
+          "ls_up": "\u2191", "ls_down": "\u2193", "ls_left": "\u2190", "ls_right": "\u2192",
+          "rs_up": "\u2191", "rs_down": "\u2193"}
+# On the map the arrow says which way, so the name is the control alone.
+MAP_NAMES = {"up": "D-pad", "down": "D-pad", "left": "D-pad", "right": "D-pad",
+             "ls_up": "Left stick", "ls_down": "Left stick", "ls_left": "Left stick", "ls_right": "Left stick",
+             "rs_up": "Right stick", "rs_down": "Right stick"}
+# What the map says for controls that are not a LAYOUT action (handled by the Pad itself).
+MAP_EXTRA = {
+    "base": {"l2": "Hold: the desktop side", "rstick": "Scroll; the further, the faster",
+             "chord": "Game mode on / off: the pad goes to the game"},
+    "world": {"l2": "Held: the desktop side", "chord": "Game mode on / off: the pad goes to the game"},
+}
+
+
+def map_rows(layer: str) -> list[dict[str, Any]]:
+    rows = []
+    for group, controls in MAP_GROUPS:
+        for control in controls:
+            if control in LAYOUT[layer]:
+                action = ACTIONS[LAYOUT[layer][control]]
+                label, labels = action.label, dict(action.labels or {})
+                kinds = sorted(action.run.by_kind) if isinstance(action.run, keys) else ["*"]
+            elif control in MAP_EXTRA[layer]:
+                label, labels, kinds = MAP_EXTRA[layer][control], {}, ["*"]
+            else:
+                continue
+            name = MAP_NAMES.get(control) or CONTROL_NAMES[control]
+            rows.append({"control": control, "group": group, "glyph": GLYPHS.get(control, ""), "name": name,
+                         "label": label, "labels": labels, "kinds": kinds})
+    return rows
+
+
+def pad_battery() -> str:
+    """The pad's charge for the map, "" when no DualSense is there."""
+    found = sorted(glob.glob(BATTERY.format(mac="*")))
+    for base in found:
+        try:
+            return Path(base, "capacity").read_text().strip() + "%"
+        except OSError:
+            continue
+    return ""
+
+
+def print_map(as_json: bool) -> None:
+    layers = {layer: map_rows(layer) for layer in LAYOUT}
+    if as_json:
+        print(json.dumps({"layers": layers, "layer_names": LAYER_NAMES, "battery": pad_battery()}, indent=1))
+        return
+    for layer, rows in layers.items():
+        if not rows:
+            continue
+        print(LAYER_NAMES[layer])
+        for row in rows:
+            print(f"  {row['glyph'] or ' '} {row['name']:<12} {row['label']}")
+
+
+def check(hypr: Hypr) -> int:
+    """Builds every action's dispatcher in the running Hyprland without running one. 0 = all build."""
+    failed = 0
+    extra = {"scroll_pointer": POINTER_TO.format(x=0, y=0),  # dispatchers that are not a control's
+             "sessions_wheel": f'hl.dsp.event("{WHEEL_ID} cancel")',
+             "map": f'hl.dsp.event("{MAP_ID} hide")'}
+    for name, expr in extra.items():
+        answer = hypr.request(f"eval local _ = {expr}")
+        ok = answer is not None and answer.strip() == "ok"
+        failed += not ok
+        print(f"{'ok  ' if ok else 'FAIL'} {name}{'' if ok else ': ' + (answer or 'Hyprland does not answer').strip()}")
+    for name, action in ACTIONS.items():
+        problems = []
+        for probe in getattr(action.run, "probes", []):
+            answer = hypr.request(f"eval {probe}")
+            if answer is None or answer.strip() != "ok":
+                problems.append((answer or "Hyprland does not answer").strip())
+        # A key name is resolved only when a chord is sent, and a bad one then raises Hyprland's
+        # red error bar on the screen; so the names are checked here, in libxkbcommon itself.
+        problems += [f"{sym} is not a key name" for sym in getattr(action.run, "keysyms", []) if not keysym_known(sym)]
+        if not hasattr(action.run, "probes"):
+            continue  # not Hyprland's (talk, ideas, jump, map)
+        failed += bool(problems)
+        print(f"{'FAIL' if problems else 'ok  '} {name}{': ' + '; '.join(problems) if problems else ''}")
+    return 1 if failed else 0
+
+
+def keysym_known(name: str) -> bool:
+    """xkb_keysym_from_name, as Hyprland's resolveKeycode calls it (case-insensitive)."""
+    import ctypes
+    import ctypes.util
+
+    lib = ctypes.CDLL(ctypes.util.find_library("xkbcommon") or "libxkbcommon.so.0")
+    lib.xkb_keysym_from_name.argtypes = [ctypes.c_char_p, ctypes.c_int]
+    lib.xkb_keysym_from_name.restype = ctypes.c_uint32
+    return lib.xkb_keysym_from_name(name.encode(), 1) != 0
+
+
+def print_status() -> None:
+    try:
+        dev = find_pad()
+    except ImportError:
+        print("pad: python-evdev is not installed")
+        dev = None
+    else:
+        if dev is None:
+            print("pad: not connected")
+        else:
+            print(f"pad: {dev.name} at {dev.path}, battery {battery(dev.uniq or '')}")
+            where = input_dir(dev)
+            rgb = SysfsLights(where).rgb / "multi_intensity"
+            print(f"lights: {'writable' if os.access(rgb, os.W_OK) else 'not writable (install the udev rule)'}")
+            nodes = sorted(Path(where, "device").glob("hidraw/hidraw*"))
+            node = f"/dev/{nodes[0].name}" if nodes else "none"
+            readable = bool(nodes) and os.access(node, os.R_OK)
+            print(f"mic button: {node} {'readable' if readable else 'not readable (install the udev rule)'}")
+            dev.close()
+    hypr = Hypr()
+    active = hypr.json("activewindow")
+    if active is None:
+        print("hyprland: not answering")
+    else:
+        print(f"hyprland: {hypr.signature[:24]}..., focused: {active.get('class') or '-'}")
+
+
+def main(argv: list[str] | None = None) -> int:
+    parser = argparse.ArgumentParser(prog="hypr-gamepad", description="The DualSense drives Hyprland.")
+    sub = parser.add_subparsers(dest="cmd", required=True)
+    run = sub.add_parser("run", help="the daemon")
+    run.add_argument("--dry", action="store_true", help="print actions instead of sending them")
+    run.add_argument("--device", help="this event node instead of the first DualSense found")
+    sub.add_parser("status", help="the pad, its battery, Hyprland")
+    sub.add_parser("check", help="build every action in the running Hyprland without running it")
+    show = sub.add_parser("map", help="what each control does")
+    show.add_argument("--json", action="store_true")
+    args = parser.parse_args(argv)
+
+    if args.cmd == "map":
+        print_map(args.json)
+    elif args.cmd == "status":
+        print_status()
+    elif args.cmd == "check":
+        return check(Hypr())
+    else:
+        logging.basicConfig(level=logging.INFO, format="hypr-gamepad: %(message)s")
+        signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
+        run_daemon(args.dry, args.device)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

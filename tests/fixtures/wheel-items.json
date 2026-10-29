@@ -1,0 +1,47 @@
+{
+ "items": [
+  {
+   "lane": "blocked",
+   "key": "server|desk|w9:p1",
+   "host": "server",
+   "session": "desk",
+   "pane": "w9:p1",
+   "agent": "claude",
+   "workspace": "ONBOARDING",
+   "name": "Web sessions update DM",
+   "why": "run waits on you",
+   "forS": 8106.585999965668,
+   "movedS": 8106.585999965668,
+   "progress": "12/14"
+  },
+  {
+   "lane": "blocked",
+   "key": "server|work|w1:p4",
+   "host": "server",
+   "session": "work",
+   "pane": "w1:p4",
+   "agent": "claude",
+   "workspace": "PROJECT",
+   "name": "Claude Code",
+   "why": "run waits on you",
+   "forS": 2974.5859999656677,
+   "movedS": 2974.5859999656677,
+   "progress": "17/19"
+  },
+  {
+   "lane": "done",
+   "key": "server|desk|w2:p1",
+   "host": "server",
+   "session": "desk",
+   "pane": "w2:p1",
+   "agent": "claude",
+   "workspace": "~",
+   "name": "Haiku para el jardín",
+   "why": "",
+   "forS": 58539.58599996567,
+   "movedS": 58539.58599996567,
+   "progress": "5/5"
+  }
+ ],
+ "more": 0
+}

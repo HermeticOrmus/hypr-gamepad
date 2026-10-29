@@ -1,0 +1,17 @@
+# hypr-gamepad: the DualSense drives Hyprland's windows, workspaces, herdr and dictation.
+# Copy into ~/.config/systemd/user/, then start it: systemctl --user enable --now hypr-gamepad
+[Unit]
+Description=hypr-gamepad: the DualSense drives windows, workspaces, herdr and dictation
+After=graphical-session.target
+PartOf=graphical-session.target
+
+[Service]
+# The session's own environment (uwsm imports it): PATH with ~/.local/bin and node for sun-wheel,
+# WAYLAND_DISPLAY and HYPRLAND_INSTANCE_SIGNATURE for voice-flow's wl-copy and hyprctl.
+Type=simple
+ExecStart=%h/.local/bin/hypr-gamepad run
+Restart=on-failure
+RestartSec=2
+
+[Install]
+WantedBy=graphical-session.target

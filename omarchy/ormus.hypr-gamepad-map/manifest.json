@@ -1,0 +1,12 @@
+{
+  "schemaVersion": 1,
+  "id": "ormus.hypr-gamepad-map",
+  "name": "hypr-gamepad map",
+  "version": "1.0.0",
+  "author": "HermeticOrmus",
+  "license": "MIT",
+  "description": "Hold Options on the DualSense: what each control does in the focused window, read from hypr-gamepad's own table.",
+  "kinds": ["overlay"],
+  "keepLoaded": true,
+  "entryPoints": { "overlay": "PadMap.qml" }
+}
