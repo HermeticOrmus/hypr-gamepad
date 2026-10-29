@@ -1576,6 +1576,7 @@ class OnlyWhatThePadHas(unittest.TestCase):
         voice = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, voice)
         with mock.patch.multiple(sp, find_pad=lambda path=None: Dev(), serve=serve, Motors=lambda dev, dry=False: FxLog(),
+                                 profile_of=lambda dev: sp.Profile(),
                                  MicReader=lambda where: mics.append(where), input_dir=lambda dev: str(self.root),
                                  DryHypr=FakeHypr, voice_dir=lambda: voice), \
                 mock.patch.object(sp.time, "sleep"), self.assertRaises(Stop):
@@ -1833,6 +1834,7 @@ class WakeNote(unittest.TestCase):
         voice = Path(tempfile.mkdtemp())
         self.addCleanup(shutil.rmtree, voice)
         with mock.patch.multiple(sp, find_pad=lambda path=None: Dev(), serve=serve, Motors=Motors,
+                                 profile_of=lambda dev: sp.Profile(),
                                  battery=lambda mac: "80% discharging", input_dir=lambda dev: "/nonexistent",
                                  DryHypr=FakeHypr, voice_dir=lambda: voice), \
                 mock.patch.object(sp.time, "sleep"), self.assertLogs("hypr-gamepad", "INFO"), \
