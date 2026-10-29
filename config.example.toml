@@ -1,0 +1,86 @@
+# hypr-gamepad's config: ~/.config/hypr-gamepad/config.toml, or $XDG_CONFIG_HOME/hypr-gamepad/,
+# or any file given with --config PATH. Every key is here with its default, commented out: set only
+# the ones you change. A key the program does not know is a warning; a wrong type, or a control or
+# action it does not know, stops it with the key named. `hypr-gamepad check` reads the file,
+# `hypr-gamepad map` shows what the pad does with it. setups/ holds whole setups people run.
+#
+# A command is a list: the program, then its arguments, each a string.
+
+# Talk: R2 held talks and letting go ends it, a tap keeps listening until the next press; the mic
+# button starts and the next press ends; Circle drops the take.
+# [talk]
+# backend = "voice-flow"          # voice-flow | command | none
+# toggle = ["voice-flow"]         # voice-flow: starts a take; run again, it ends it and pastes
+# state_dir = ""                  # voice-flow: its state files; "" is $XDG_RUNTIME_DIR/ormus-voice
+# start = []                      # command: run when a talk starts
+# stop = []                       # command: run when it ends; your tool types the words
+# cancel = []                     # command: run when Circle drops it
+
+# Triangle.
+# [jump]
+# backend = "herdr"               # herdr: sends [herdr.keys].jump to a herdr window | command | none
+# items = []                      # command: prints {"items": [{"key": "...", "name": "..."}]}, first = waits most
+# go = []                         # command: shows one; its key goes where "{key}" stands, else at the end
+
+# PS tap.
+# [board]
+# command = []                    # run through Hyprland, as a key binding's exec is
+# label = ""                      # what the map says; "" with a command: "Tap: the board"
+
+# PS held.
+# [wheel]
+# plugin = ""                     # an Omarchy shell plugin id; it gets padhold, aim, release and cancel events
+
+# Create.
+# [ideas]
+# command = []
+
+# Which windows are which. Each list adds to what is built in.
+# [windows]
+# herdr_classes = []              # window classes that are herdr (built in: org.omarchy.herdr)
+# herdr_class_prefixes = []       # class prefixes that are herdr: a terminal per remote session, say
+# herdr_programs = []             # a program under a terminal that means herdr runs there (built in: herdr)
+# board_titles = []               # titles of a board app's window: [ ] tabs, Alt+Up/Down agents, Tab tiles
+# terminals = []                  # built in: foot, kitty, Alacritty, com.mitchellh.ghostty,
+#                                 # org.wezfurlong.wezterm, org.omarchy.terminal
+# browsers = []                   # built in: chromium, google-chrome, zen, firefox, brave-browser, microsoft-edge
+
+# herdr's keys in herdr's own syntax (ctrl+alt+], alt+left, prefix+n), as in your
+# ~/.config/herdr/config.toml. The defaults are herdr 0.9.5's. A key set to "" does nothing in herdr.
+# [herdr]
+# prefix = "ctrl+b"
+
+# [herdr.keys]
+# tab_prev = "prefix+p"           # L1
+# tab_next = "prefix+n"           # R1
+# agent_prev = "prefix+k"         # left stick up (herdr 0.9.5 has no agent keys: the pane above)
+# agent_next = "prefix+j"         # left stick down
+# space_prev = "prefix+h"         # left stick left (nor workspace keys: the pane to the left)
+# space_next = "prefix+l"         # left stick right
+# zoom = "prefix+z"               # on no control unless the layout puts it on one
+# jump = "prefix+o"               # Triangle, with [jump] backend herdr: the latest notification
+
+# What the map says in a herdr window.
+# [herdr.labels]
+# tab_prev = "Previous herdr tab"
+# tab_next = "Next herdr tab"
+# agent_prev = "Pane above"
+# agent_next = "Pane below"
+# space_prev = "Pane to the left"
+# space_next = "Pane to the right"
+# zoom = "Zoom the herdr pane"
+# jump = "Go to herdr's latest notification"
+
+# The layout: a control to an action, per side; "" unbinds it; only the controls listed change.
+# Controls (as `hypr-gamepad map --json` names them): cross circle square triangle up down left right
+# l1 r1 r2 l3 r3 ls_up ls_down ls_left ls_right ps options create mic, and on the desktop side also
+# rs_up rs_down (inside the window the right stick scrolls). L2 is the side itself.
+# Actions: enter escape mode take_back arrow_up arrow_down arrow_left arrow_right tab_prev tab_next
+# agent_prev agent_next space_prev space_next zoom size_up size_down size_normal talk talk_toggle
+# ideas jump board map focus_left focus_right focus_up focus_down workspace_prev workspace_next
+# screen_left screen_right screen_up screen_down fullscreen workspace_back window_next scratchpad.
+# For example, Triangle zooms the herdr pane and Square does nothing:
+#   triangle = "zoom"
+#   square = ""
+# [layout.base]                   # inside the window
+# [layout.world]                  # L2 held: the desktop

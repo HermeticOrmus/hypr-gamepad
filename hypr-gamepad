@@ -1,15 +1,22 @@
 #!/usr/bin/env python3
-"""hypr-gamepad: the DualSense drives Hyprland.
+"""hypr-gamepad: a gamepad drives Hyprland.
 
-The aim: herdr's agents, voice-to-text dictation, and every window, tab, herdr space and workspace,
-driven from the controller alone, with the hands off the keyboard.
+The aim: herdr's agents, voice-to-text dictation, and every window, tab, herdr pane and workspace,
+driven from the controller alone, with the hands off the keyboard. Made for the DualSense.
 
     hypr-gamepad run [--dry] [--device PATH]   the daemon; hypr-gamepad.service runs it
-    hypr-gamepad status                        the pad, its battery, Hyprland
-    hypr-gamepad check                         every action builds in the running Hyprland (runs none)
-    hypr-gamepad map [--json]                  what each control does, read from LAYOUT
+    hypr-gamepad status                        the pad, its battery, Hyprland, the config file
+    hypr-gamepad check                         the config, then every action builds in the running
+                                               Hyprland (runs none)
+    hypr-gamepad map [--json]                  what each control does, from LAYOUT and the config
 
-Inside the focused window (herdr here or on another machine, a browser, the Sun board, any window):
+Each takes --config PATH. Without it the config is $XDG_CONFIG_HOME/hypr-gamepad/config.toml
+(~/.config/hypr-gamepad/config.toml), and no file there means the defaults described here:
+config.example.toml lists every key with its default, setups/ holds whole setups people run. A key
+the program does not know is a warning; a wrong type, or a control or action it does not know, stops
+it with the key named.
+
+Inside the focused window (herdr, here or on another machine; a browser; a board app; any window):
 
     Cross        Enter: send, confirm
     Circle       Esc: back, stop the agent
@@ -17,32 +24,43 @@ Inside the focused window (herdr here or on another machine, a browser, the Sun 
                  Ctrl+Backspace elsewhere); held, it keeps deleting, faster and faster. Never Esc:
                  a running agent keeps running
     D-pad        arrow keys (held: they repeat)
-    L1 / R1      previous / next tab: herdr's, the browser's, the board's, a window group's
-    Left stick   up / down: previous / next agent; left / right: previous / next herdr space
-                 (the browser: back / forward; the board: the tile before / after)
+    L1 / R1      previous / next tab: herdr's, the browser's, a board's, a window group's
+    Left stick   in herdr, the keys [herdr.keys] gives agent_prev / agent_next (up / down) and
+                 space_prev / space_next (left / right): by default herdr's own pane keys, so the
+                 pane above, below, to the left, to the right. The browser: back / forward (left /
+                 right); a board: the tile before / after
     L3           Shift+Tab: the agent's mode (plan, accept edits)
     R3           normal text size in the focused window (Ctrl+0), in either layer
     Right stick  scroll, smoothly: the further it tilts, the faster
 
-Agents that wait on you:
+herdr's keys ([herdr]) are written in herdr's own syntax and default to herdr 0.9.5's: prefix Ctrl+B,
+tabs prefix+p / prefix+n, panes prefix+k / j / h / l, zoom prefix+z, the latest notification
+prefix+o. A key set to "" does nothing in herdr. A window is herdr's by its class, or a terminal with
+herdr running under it, or a terminal titled as herdr titles its window; [windows] adds classes,
+class prefixes, program names, terminals, browsers and the titles of a board app.
 
-    Triangle     show in herdr the agent that waits on you most; again: the next one
-    PS tap       raise the Sun board
-    PS held      the sessions wheel on this screen: the right stick lights a slot, let go of PS to
-                 show it in herdr; Circle closes it
+What the pad reaches beyond the window, each from its table in the config (off unless it says):
+
+    Triangle     [jump]: herdr's jump key to a herdr window (default: prefix+o, the agent that called
+                 last; elsewhere a note says it works inside herdr), or a command that lists the
+                 agents that wait (again within 10 s: the next one)
+    PS tap       [board]: a command, a board app's launcher
+    PS held      [wheel]: a sessions wheel shell plugin on this screen: the right stick lights a
+                 slot, let go of PS to show it; Circle closes it
+    Create       [ideas]: a command, a voice ideas listener's toggle; unset, a note says so once
 
 The map, in either layer:
 
     Options held what each control does in the focused window, on screen; a tap keeps it up until
                  the next one (the shell plugin ormus.hypr-gamepad-map)
 
-Talk, in either layer:
+Talk, in either layer ([talk]: voice-flow by default, or a command each to start, stop and cancel,
+or none):
 
-    R2 held      talk; let go and the words land in the focused window (voice-flow, as Super+H)
+    R2 held      talk; let go and the words land in the focused window
     R2 tap       keeps listening until the next tap
     Mic button   talk: a press starts, the next press pastes (needs the udev rule below)
     Circle       while talking: drop the recording, nothing is pasted
-    Create       the voice-ideas listener on / off (as Super+Shift+H)
 
 The pad's lights (needs the udev rule below):
 
@@ -73,12 +91,16 @@ L2 held is the world layer, the desktop:
     Square       next window on this workspace
     Triangle     scratchpad on / off
 
+The layout ([layout.base], [layout.world]) sets any one control to any action by name (`map --json`
+names the controls, ACTIONS the actions; zoom, herdr's pane zoom, is bound to none by default); ""
+unbinds it. Only the controls listed change.
+
 The daemon grabs the pad, so no other program reads it while it runs; game mode (PS + Options)
-gives it to a game. Each press becomes one action from LAYOUT, sent to Hyprland over its request socket as
-a Lua dispatcher: 0.5 ms a call, where hyprctl takes 16 ms (measured on a test machine, 2026-10-29). Nothing is
-typed into the desktop through uinput: a key for a window goes to that window through Hyprland's
-send_shortcut, which hands the window the key and gives focus back in the same call. --dry prints each action instead of sending it, and reads
-Hyprland only to look.
+gives it to a game. Each press becomes one action from the layout, sent to Hyprland over its request
+socket as a Lua dispatcher: 0.5 ms a call, where hyprctl takes 16 ms (measured on a test machine,
+2026-10-29). Nothing is typed into the desktop through uinput: a key for a window goes to that window
+through Hyprland's send_shortcut, which hands the window the key and gives focus back in the same
+call. --dry prints each action instead of sending it, and reads Hyprland only to look.
 """
 from __future__ import annotations
 
@@ -89,13 +111,15 @@ import logging
 import os
 import re
 import select
+import shlex
 import signal
 import socket
 import subprocess
 import sys
 import tempfile
 import time
-from dataclasses import dataclass
+import tomllib
+from dataclasses import dataclass, field, fields, is_dataclass
 from pathlib import Path
 from typing import Any, Callable, Protocol
 
@@ -136,6 +160,225 @@ def repeat_gap(profile: str, held: float) -> float:
         return gap
     fastest, ramp = speedup
     return gap + (fastest - gap) * min(1.0, max(0.0, (held - first) / ramp))
+
+
+# --- The config file ------------------------------------------------------------------------------
+# What the pad talks to besides Hyprland (talk, the jump, a board, a wheel, ideas), which windows are
+# herdr's, herdr's keys and the layout. Each table is a frozen dataclass whose defaults are a friend's:
+# herdr 0.9.5's own keys, voice-flow for talk, nothing of any one desk. CONFIG is read when an action
+# runs, never when this file loads, so tests swap it.
+
+@dataclass(frozen=True)
+class TalkConfig:
+    backend: str = "voice-flow"                  # voice-flow | command | none
+    toggle: tuple[str, ...] = ("voice-flow",)    # voice-flow: starts a take; run again, ends it
+    state_dir: str = ""                          # voice-flow's; "" = $XDG_RUNTIME_DIR/ormus-voice
+    start: tuple[str, ...] = ()                  # command: a talk starts
+    stop: tuple[str, ...] = ()                   # command: it ends; the tool types the words
+    cancel: tuple[str, ...] = ()                 # command: Circle drops it
+
+
+@dataclass(frozen=True)
+class JumpConfig:
+    backend: str = "herdr"                       # herdr: [herdr.keys].jump | command | none
+    items: tuple[str, ...] = ()                  # command: prints {"items": [{"key": ...}, ...]}
+    go: tuple[str, ...] = ()                     # command: shows one; its key replaces "{key}", else ends it
+
+
+@dataclass(frozen=True)
+class BoardConfig:
+    command: tuple[str, ...] = ()                # PS tap runs it, through Hyprland's exec
+    label: str = ""                              # the map's words; "" with a command: "Tap: the board"
+
+
+@dataclass(frozen=True)
+class WheelConfig:
+    plugin: str = ""                             # PS held: a shell plugin id taking padhold/aim events
+
+
+@dataclass(frozen=True)
+class IdeasConfig:
+    command: tuple[str, ...] = ()                # Create runs it
+
+
+@dataclass(frozen=True)
+class WindowsConfig:
+    """Each list adds to the built-in set of the same name."""
+
+    herdr_classes: tuple[str, ...] = ()
+    herdr_class_prefixes: tuple[str, ...] = ()
+    herdr_programs: tuple[str, ...] = ()         # a process under a terminal that means herdr runs there
+    board_titles: tuple[str, ...] = ()
+    terminals: tuple[str, ...] = ()
+    browsers: tuple[str, ...] = ()
+
+
+@dataclass(frozen=True)
+class HerdrKeys:
+    """herdr's own syntax; herdr 0.9.5's defaults (docs/keyboard.mdx). "" = nothing in herdr."""
+
+    tab_prev: str = "prefix+p"
+    tab_next: str = "prefix+n"
+    agent_prev: str = "prefix+k"                 # 0.9.5 has no agent keys: the pane above
+    agent_next: str = "prefix+j"
+    space_prev: str = "prefix+h"                 # nor next / previous workspace: the pane to the left
+    space_next: str = "prefix+l"
+    zoom: str = "prefix+z"
+    jump: str = "prefix+o"                       # the latest notification
+
+
+@dataclass(frozen=True)
+class HerdrLabels:
+    """What the map says in a herdr window, per action."""
+
+    tab_prev: str = "Previous herdr tab"
+    tab_next: str = "Next herdr tab"
+    agent_prev: str = "Pane above"
+    agent_next: str = "Pane below"
+    space_prev: str = "Pane to the left"
+    space_next: str = "Pane to the right"
+    zoom: str = "Zoom the herdr pane"
+    jump: str = "Go to herdr's latest notification"
+
+
+@dataclass(frozen=True)
+class HerdrConfig:
+    prefix: str = "ctrl+b"
+    keys: HerdrKeys = field(default_factory=HerdrKeys)
+    labels: HerdrLabels = field(default_factory=HerdrLabels)
+
+
+@dataclass(frozen=True)
+class LayoutConfig:
+    base: dict[str, str] = field(default_factory=dict)    # control -> action; "" unbinds
+    world: dict[str, str] = field(default_factory=dict)
+
+
+@dataclass(frozen=True)
+class Config:
+    talk: TalkConfig = field(default_factory=TalkConfig)
+    jump: JumpConfig = field(default_factory=JumpConfig)
+    board: BoardConfig = field(default_factory=BoardConfig)
+    wheel: WheelConfig = field(default_factory=WheelConfig)
+    ideas: IdeasConfig = field(default_factory=IdeasConfig)
+    windows: WindowsConfig = field(default_factory=WindowsConfig)
+    herdr: HerdrConfig = field(default_factory=HerdrConfig)
+    layout: LayoutConfig = field(default_factory=LayoutConfig)
+
+
+CONFIG = Config()  # main() sets it from the file before anything runs
+TALK_BACKENDS = ("voice-flow", "command", "none")
+JUMP_BACKENDS = ("herdr", "command", "none")
+PLUGIN_ID = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*")  # it goes into a Lua string: nothing to escape
+
+
+class ConfigError(Exception):
+    """A config the pad cannot run with; the message names the key."""
+
+
+def default_config_path() -> Path:
+    base = os.environ.get("XDG_CONFIG_HOME") or os.path.join(os.path.expanduser("~"), ".config")
+    return Path(base, "hypr-gamepad", "config.toml")
+
+
+def read_config(path: str | Path | None) -> tuple[Config, list[str]]:
+    """The config at `path`, and a warning for each key it does not know. No path: the default one,
+    where no file means the defaults; a path that was named must be there."""
+    named = path is not None
+    path = Path(path) if path is not None else default_config_path()
+    try:
+        with path.open("rb") as handle:
+            table = tomllib.load(handle)
+    except FileNotFoundError:
+        if named:
+            raise ConfigError(f"{path}: no such file") from None
+        return Config(), []
+    except (OSError, tomllib.TOMLDecodeError) as exc:
+        raise ConfigError(f"{path}: {exc}") from None
+    warnings: list[str] = []
+    try:
+        config = build(Config, table, "", warnings)
+        validate(config)
+    except ConfigError as exc:
+        raise ConfigError(f"{path}: {exc}") from None
+    return config, [f"{path}: {warning}" for warning in warnings]
+
+
+def load_config(path: str | Path | None = None) -> Config:
+    """read_config, its warnings logged, one line each."""
+    config, warnings = read_config(path)
+    for warning in warnings:
+        log.warning("%s", warning)
+    return config
+
+
+def build(cls: type, table: Any, where: str, warnings: list[str]) -> Any:
+    """One table of the file as `cls`; each value must have the type of the field's default."""
+    if not isinstance(table, dict):
+        raise ConfigError(f"{where} must be a table")
+    default, values = cls(), {}
+    known = {f.name for f in fields(cls)}
+    for key, value in table.items():
+        name = f"{where}.{key}" if where else key
+        if key not in known:
+            warnings.append(f"unknown key {name}")
+            continue
+        current = getattr(default, key)
+        if is_dataclass(current):
+            values[key] = build(type(current), value, name, warnings)
+        elif isinstance(current, str):
+            if not isinstance(value, str):
+                raise ConfigError(f"{name} must be a string")
+            values[key] = value
+        elif isinstance(current, tuple):
+            if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+                raise ConfigError(f"{name} must be a list of strings")
+            values[key] = tuple(value)
+        else:  # a layout side: control -> action name
+            if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
+                raise ConfigError(f"{name} must be a table of control = \"action\"")
+            values[key] = dict(value)
+    return cls(**values)
+
+
+def validate(config: Config) -> None:
+    """What the types do not say: the backends, what each needs, herdr's keys, the layout's names."""
+    for name, value, choices in (("talk.backend", config.talk.backend, TALK_BACKENDS),
+                                 ("jump.backend", config.jump.backend, JUMP_BACKENDS)):
+        if value not in choices:
+            raise ConfigError(f"{name}: {value!r} is not one of {', '.join(choices)}")
+    needs = {"voice-flow": ["toggle"], "command": ["start"]}.get(config.talk.backend, [])
+    needs = [f"talk.{key}" for key in needs if not getattr(config.talk, key)]
+    needs += [f"jump.{key}" for key in ("items", "go")
+              if config.jump.backend == "command" and not getattr(config.jump, key)]
+    if needs:
+        raise ConfigError(f"{needs[0]}: its backend needs this command")
+    if config.wheel.plugin and not PLUGIN_ID.fullmatch(config.wheel.plugin):
+        raise ConfigError(f"wheel.plugin: {config.wheel.plugin!r} is not a plugin id")
+    try:
+        if config.herdr.prefix:
+            herdr_chord(config.herdr.prefix)
+    except ValueError as exc:
+        raise ConfigError(f"herdr.prefix: {exc}") from None
+    for key in fields(HerdrKeys):
+        try:
+            herdr_chords(getattr(config.herdr.keys, key.name), config.herdr.prefix)
+        except ValueError as exc:
+            raise ConfigError(f"herdr.keys.{key.name}: {exc}") from None
+    for layer in ("base", "world"):
+        for control, action in getattr(config.layout, layer).items():
+            name = f"layout.{layer}.{control}"
+            if control not in bindable(layer):
+                raise ConfigError(f"{name}: no such control here (`hypr-gamepad map --json` names them)")
+            if action and action not in ACTIONS:
+                raise ConfigError(f"{name}: {action!r} is not an action")
+
+
+def bindable(layer: str) -> set[str]:
+    """The controls a layout side can bind: L2 is the layer itself, the right stick scrolls inside the
+    window (it flicks only on the desktop side), and the chord belongs to game mode."""
+    controls = set(CONTROL_NAMES) - {LAYER_KEY, "rstick", "chord"}
+    return controls if layer == "world" else controls - {"rs_up", "rs_down"}
 
 
 # --- Hyprland ------------------------------------------------------------------------------------
@@ -226,8 +469,8 @@ class DryHypr(Hypr):
 TERMINALS = {"foot", "kitty", "Alacritty", "com.mitchellh.ghostty", "org.wezfurlong.wezterm", "org.omarchy.terminal"}
 BROWSERS = {"chromium", "google-chrome", "zen", "firefox", "brave-browser", "microsoft-edge"}
 HERDR_CLASSES = {"org.omarchy.herdr"}
-WORKBOARD = "org.ormus.workboard."  # a workboard window: a herdr client on another machine, over SSH
-HERDR_PROGRAMS = {"herdr", "herdr-theme"}
+HERDR_PROGRAMS = {"herdr"}
+# [windows] adds to each of these sets, and names the class prefixes and board titles.
 # herdr titles its window "{hostname}: {workspace}" (ui.window_title): "desktop: MAIN",
 # "server: BACKEND". The title is all that tells a terminal running herdr on another machine
 # over a plain `ssh`; a shell's own title carries "user@host".
@@ -243,21 +486,28 @@ class Window:
     grouped: int   # windows in its Hyprland group; 0 when it is in none
 
 
+def is_terminal(cls: str) -> bool:
+    return cls in TERMINALS or cls in CONFIG.windows.terminals
+
+
 def classify(cls: str, title: str, herdr_runs: bool) -> str:
-    if cls in HERDR_CLASSES or cls.startswith(WORKBOARD):
+    windows = CONFIG.windows
+    if cls in HERDR_CLASSES or cls in windows.herdr_classes or cls.startswith(windows.herdr_class_prefixes):
         return "herdr"
-    if title == "Sun board":
+    if title in windows.board_titles:
         return "board"
-    if cls in BROWSERS:
+    if cls in BROWSERS or cls in windows.browsers:
         return "browser"
-    if cls in TERMINALS:
+    if is_terminal(cls):
         return "herdr" if herdr_runs or HERDR_TITLE.match(title) else "terminal"
     return "other"
 
 
 def runs_herdr(pid: int, proc: str = "/proc", depth: int = 4) -> bool:
     """Whether a herdr client runs under this process: a local one (foot > bash > herdr) or one on
-    another machine (foot > bash > ssh server ... herdr-theme attach)."""
+    another machine (foot > bash > ssh server ... herdr attach), by the program names in
+    HERDR_PROGRAMS and [windows].herdr_programs."""
+    programs = HERDR_PROGRAMS | set(CONFIG.windows.herdr_programs)
     frontier = [pid]
     for _ in range(depth):
         found: list[int] = []
@@ -271,7 +521,7 @@ def runs_herdr(pid: int, proc: str = "/proc", depth: int = 4) -> bool:
                     argv = Path(proc, kid, "cmdline").read_bytes().split(b"\0")
                 except OSError:
                     continue
-                if any(Path(arg.decode(errors="replace")).name in HERDR_PROGRAMS for arg in argv if arg):
+                if any(Path(arg.decode(errors="replace")).name in programs for arg in argv if arg):
                     return True
                 found.append(int(kid))
         frontier = found[:64]
@@ -290,7 +540,7 @@ class Windows:
             return None
         cls, title = str(data.get("class") or ""), str(data.get("title") or "")
         pid = int(data.get("pid") or 0)
-        herdr = cls in TERMINALS and pid > 0 and runs_herdr(pid, self.proc)
+        herdr = is_terminal(cls) and pid > 0 and runs_herdr(pid, self.proc)
         grouped = data.get("grouped")
         return Window(str(data["address"]), cls, title, classify(cls, title, herdr),
                       len(grouped) if isinstance(grouped, list) else 0)
@@ -377,7 +627,8 @@ START_WAIT_S = 3.0  # how long a pad that went away waits for a starting recorde
 
 
 class Talk:
-    """R2: hold to talk, let go to paste; a tap keeps listening until the next tap.
+    """R2: hold to talk, let go to paste; a tap keeps listening until the next tap. [talk] backend
+    "voice-flow"; `toggle` is the command, `state_dir` where it keeps its state.
 
     voice-flow does the work, as Super+H: its first call starts recording (recording.state appears),
     its second transcribes and pastes into the focused window, or leaves the words on the clipboard
@@ -387,8 +638,10 @@ class Talk:
     sends Talk back to idle, and a pad that goes away waits for a starting recorder and drops it, so
     nothing the user did not let go of is ever pasted (independent review, 2026-10-29)."""
 
-    def __init__(self, runner: Runner, fx: Fx, clock: Callable[[], float], state_dir: Path):
+    def __init__(self, runner: Runner, fx: Fx, clock: Callable[[], float], state_dir: Path,
+                 toggle: tuple[str, ...]):
         self.runner, self.fx, self.clock, self.dir = runner, fx, clock, state_dir
+        self.toggle = list(toggle)
         self.sleep: Callable[[float], None] = time.sleep  # reset() waits on a starting recorder
         self.state = "idle"
         self.proc: Proc | None = None
@@ -403,9 +656,9 @@ class Talk:
         return self.state in ("starting", "recording")
 
     def call_voice_flow(self, next_state: str) -> None:
-        self.proc = self.runner.spawn(["voice-flow"])
+        self.proc = self.runner.spawn(list(self.toggle))
         if self.proc is None:
-            self.fx.notify("Talk", "voice-flow did not start")
+            self.fx.notify("Talk", f"{self.toggle[0]} did not start")
             self.state, self.held = "idle", False
             return
         self.state = next_state
@@ -529,6 +782,106 @@ class Talk:
         self.held = False
 
 
+class CommandTalk:
+    """[talk] backend "command": a dictation tool driven by plain commands, with Talk's feel. A press
+    runs `start`; let go after a hold runs `stop` (the tool types the words); a tap keeps listening
+    until the next press, which runs `stop`; Circle runs `cancel`. The commands are only started:
+    whether anything was heard is the tool's to say."""
+
+    def __init__(self, runner: Runner, fx: Fx, clock: Callable[[], float], talk: TalkConfig):
+        self.runner, self.fx, self.clock, self.config = runner, fx, clock, talk
+        self.state = "idle"  # idle | talking
+        self.held = False
+        self.pressed_at = 0.0
+
+    def active(self) -> bool:
+        return self.state == "talking"
+
+    def call(self, argv: tuple[str, ...]) -> bool:
+        if argv and self.runner.spawn(list(argv)) is None:
+            self.fx.notify("Talk", f"{argv[0]} did not start")
+            return False
+        return True
+
+    def press(self) -> None:
+        if self.active():                      # latched: this press ends it
+            self.end(self.config.stop, "double")
+        elif self.call(self.config.start):
+            self.state, self.held, self.pressed_at = "talking", True, self.clock()
+            self.fx.rumble("tick")
+
+    def release(self) -> None:
+        if not self.held:
+            return
+        self.held = False
+        if self.clock() - self.pressed_at < TALK_LATCH_S:
+            self.fx.rumble("click")            # a tap: it keeps listening
+        else:
+            self.end(self.config.stop, "double")
+
+    def end(self, argv: tuple[str, ...], rumble: str) -> None:
+        self.state, self.held = "idle", False
+        self.call(argv)
+        self.fx.rumble(rumble)
+
+    def drop(self) -> bool:
+        """Circle while talking: `cancel`, nothing is typed. True when it dropped one."""
+        if not self.active():
+            return False
+        self.end(self.config.cancel, "click")
+        return True
+
+    def tick(self) -> None:
+        pass
+
+    def reset(self) -> None:
+        """The pad went away: never type what nobody let go of."""
+        if self.drop():
+            self.fx.notify("Talk", "The pad went away: the recording was dropped")
+
+
+class NoTalk:
+    """[talk] backend "none": the first press says where talk is set up."""
+
+    state = "idle"
+
+    def __init__(self, fx: Fx):
+        self.fx, self.said = fx, False
+
+    def press(self) -> None:
+        if not self.said:
+            self.said = True
+            self.fx.notify("Talk is not set up", "see [talk] in the config")
+
+    def release(self) -> None:
+        pass
+
+    def drop(self) -> bool:
+        return False
+
+    def active(self) -> bool:
+        return False
+
+    def tick(self) -> None:
+        pass
+
+    def reset(self) -> None:
+        pass
+
+
+def make_talk(runner: Runner, fx: Fx, clock: Callable[[], float],
+              state_dir: Path | None = None) -> Talk | CommandTalk | NoTalk:
+    """The talk backend [talk] names. `state_dir` stands in for voice-flow's own (the tests')."""
+    talk = CONFIG.talk
+    if talk.backend == "command":
+        return CommandTalk(runner, fx, clock, talk)
+    if talk.backend == "none":
+        return NoTalk(fx)
+    if state_dir is None:
+        state_dir = Path(os.path.expanduser(talk.state_dir)) if talk.state_dir else voice_dir()
+    return Talk(runner, fx, clock, state_dir, talk.toggle)
+
+
 # --- Scrolling -----------------------------------------------------------------------------------
 
 SCROLL_DEAD = 0.18               # tilt below this is the stick at rest
@@ -621,7 +974,6 @@ class Scroll:
 
 # --- The sessions wheel ---------------------------------------------------------------------------
 
-WHEEL_ID = "ormus.sessions-wheel"
 AIM_EVERY_S = 0.03   # the stick's aim reaches the wheel at most this often
 AIM_STEP = 0.05      # and only when it moved this much
 
@@ -643,12 +995,12 @@ def focused_center(hypr: Hypr) -> tuple[float, float] | None:
 
 
 class SessionsWheel:
-    """PS held: the sessions wheel (Omarchy shell plugin ormus.sessions-wheel) opens in the middle of
+    """PS held: a sessions wheel (the Omarchy shell plugin [wheel].plugin names) opens in the middle of
     the focused screen; the right stick lights the slot it points at; letting go of PS shows that
-    session in herdr (the wheel runs `sun-wheel jump`, as for the mouse); Circle closes it, no jump.
+    session (the wheel does the jump, as for the mouse); Circle closes it, no jump. No plugin: off.
 
-    It talks to the wheel the way ~/.config/hypr/sessions_wheel.lua does, with Hyprland events:
-    "padhold <token> <x> <y>", "aim <token> <sx> <sy>", "release <token> nan nan", "cancel"."""
+    It talks to the plugin with Hyprland events: "padhold <token> <x> <y>", "aim <token> <sx> <sy>",
+    "release <token> nan nan", "cancel"."""
 
     def __init__(self, hypr: Hypr, fx: Fx, clock: Callable[[], float]):
         self.hypr, self.fx, self.clock = hypr, fx, clock
@@ -658,9 +1010,11 @@ class SessionsWheel:
         self.last = float("-inf")
 
     def send(self, message: str) -> None:
-        self.hypr.dispatch(f'hl.dsp.event("{WHEEL_ID} {message}")')
+        self.hypr.dispatch(f'hl.dsp.event("{CONFIG.wheel.plugin} {message}")')
 
     def open(self) -> None:
+        if not CONFIG.wheel.plugin:
+            return  # no wheel: a long PS press does nothing
         center = focused_center(self.hypr)
         x, y = center if center else (float("nan"), float("nan"))
         self.seq += 1
@@ -705,12 +1059,12 @@ JUMP_CYCLE_S = 10.0  # Triangle again within this walks on down the same list; l
 
 
 class Jump:
-    """Triangle: show in herdr the agent that waits on the user most; press again for the next one.
+    """Triangle, [jump] backend "command": show the agent that waits on the user most; press again for
+    the next one.
 
-    The list is the sessions wheel's (`sun-wheel items`: the Sun board's own triage, what needs the
-    user first), so the pad, the wheel and the board never disagree. The jump is `sun-wheel jump`, the
-    same as a wheel slot or a click on the board: an agent on another machine can open its workboard
-    window first."""
+    `items` prints the list, the one that needs the user first at the top ({"items": [{"key", "name",
+    "host", "workspace", "why", "lane"}, ...]}); `go` shows one, its key where "{key}" stands or at the
+    end. A list from the same tool as a board or a wheel keeps the three from disagreeing."""
 
     def __init__(self, runner: Runner, fx: Fx, clock: Callable[[], float]):
         self.runner, self.fx, self.clock = runner, fx, clock
@@ -733,10 +1087,11 @@ class Jump:
         handle, name = tempfile.mkstemp(prefix="hypr-gamepad-wheel-", suffix=".json")
         os.close(handle)
         out = Path(name)
-        proc = self.runner.capture(["sun-wheel", "items"], out)
+        argv = list(CONFIG.jump.items)
+        proc = self.runner.capture(argv, out)
         if proc is None:
             out.unlink(missing_ok=True)
-            self.fx.notify("Agents", "sun-wheel did not start")
+            self.fx.notify("Agents", f"{argv[0]} did not start")
             return
         self.listing = (proc, out)
 
@@ -751,7 +1106,7 @@ class Jump:
             out.unlink(missing_ok=True)
             if not isinstance(items, list):
                 self.items = []
-                self.fx.notify("Agents", "The Sun board does not answer")
+                self.fx.notify("Agents", f"{Path(CONFIG.jump.items[0]).name} does not answer")
             elif not items:
                 self.items = []
                 self.fx.rumble("click")
@@ -762,7 +1117,7 @@ class Jump:
         if self.jumping is not None and self.jumping.poll() is not None:
             if self.jumping.poll() == 0:
                 self.fx.rumble("double")
-            self.jumping = None  # a failed jump: sun-wheel --notify already said why
+            self.jumping = None  # a failed jump: the command says why, or nothing does
 
     def go(self) -> None:
         item = self.items[self.index]
@@ -771,7 +1126,9 @@ class Jump:
         self.fx.notify(f"{self.index + 1} of {len(self.items)}: {item.get('name') or item.get('key')}",
                        " · ".join(x for x in (where, why) if x))
         self.fx.rumble("tick")
-        self.jumping = self.runner.spawn(["sun-wheel", "jump", str(item.get("key")), "--notify"])
+        key, go = str(item.get("key")), list(CONFIG.jump.go)
+        argv = [key if arg == "{key}" else arg for arg in go] + ([] if "{key}" in go else [key])
+        self.jumping = self.runner.spawn(argv)
 
     def reset(self) -> None:
         if self.listing is not None:
@@ -876,6 +1233,7 @@ class Action:
     tap: bool = False                           # runs when let go quickly; a long hold is left for more
     hold: Callable[["Pad", "Press"], None] | None = None  # once, when held past TAP_S
     labels: dict[str, str] | None = None        # what the map says in a window of that kind
+    live_label: Callable[[str], str] | None = None  # the label under CONFIG, from `label`; "" = no row
 
 
 @dataclass
@@ -994,22 +1352,66 @@ def chord(mods: str, key: str) -> tuple[Key, ...]:
     return (Key(mods, key),)
 
 
+HERDR_MODS = {"ctrl": "CTRL", "alt": "ALT", "shift": "SHIFT", "super": "SUPER"}
+# herdr's key names, as xkb names them (send_shortcut takes a keysym); a letter or digit is itself.
+HERDR_KEYS = {
+    "left": "Left", "right": "Right", "up": "Up", "down": "Down", "enter": "Return", "esc": "Escape",
+    "tab": "Tab", "space": "space", "backspace": "BackSpace", "delete": "Delete", "insert": "Insert",
+    "home": "Home", "end": "End", "pageup": "Prior", "pagedown": "Next",
+    "[": "bracketleft", "]": "bracketright", "-": "minus", "minus": "minus", "=": "equal", ";": "semicolon",
+    "'": "apostrophe", ",": "comma", ".": "period", "/": "slash", "\\": "backslash", "`": "grave",
+}
+
+
+def herdr_chord(text: str) -> Key:
+    """One chord in herdr's syntax ("ctrl+alt+]") as a Key ("CTRL ALT", "bracketright")."""
+    *mods, name = text.lower().split("+")
+    sym = HERDR_KEYS.get(name) or (name.upper() if re.fullmatch(r"f\d{1,2}", name) else
+                                   name if re.fullmatch(r"[a-z0-9]", name) else None)
+    if sym is None or any(mod not in HERDR_MODS for mod in mods):
+        raise ValueError(f"{text!r} is not a key")
+    return Key(" ".join(HERDR_MODS[mod] for mod in mods), sym)
+
+
+def herdr_chords(text: str, prefix: str) -> tuple[Key, ...]:
+    """A herdr key as the chords that press it: "alt+left" is one, "prefix+n" the prefix's then n's.
+    "" is none: the action does nothing in herdr. Raises ValueError."""
+    if not text:
+        return ()
+    if text.lower() == "prefix" or text.lower().startswith("prefix+"):
+        if not prefix:
+            raise ValueError(f"{text!r} needs [herdr].prefix")
+        return (herdr_chord(prefix), herdr_chord(text[len("prefix+"):]))
+    return (herdr_chord(text),)
+
+
+def herdr_step(name: str) -> tuple[Key, ...]:
+    """The chords of [herdr.keys].<name>, read when they are sent (load_config checked them)."""
+    return herdr_chords(getattr(CONFIG.herdr.keys, name), CONFIG.herdr.prefix)
+
+
 Step = tuple[Key, ...] | str  # chords in order (herdr's prefix, then its key), or a dispatcher
 
 
 @dataclass(frozen=True)
 class keys:
     """An action whose keys depend on the window it was pressed in: `by_kind` maps a window kind to its
-    step; "group" serves a window in a Hyprland group whose kind has no step; "*" serves any window."""
+    step; "group" serves a window in a Hyprland group whose kind has no step; "*" serves any window.
+    `herdr` names the [herdr.keys] entry that is the herdr window's step; "" there sends nothing."""
 
     by_kind: dict[str, Step]
+    herdr: str = ""
+
+    def steps(self) -> dict[str, Step]:
+        return {"herdr": herdr_step(self.herdr), **self.by_kind} if self.herdr else self.by_kind
 
     def step_for(self, window: Window) -> Step | None:
-        if window.kind in self.by_kind:
-            return self.by_kind[window.kind]
-        if window.grouped > 1 and "group" in self.by_kind:
-            return self.by_kind["group"]
-        return self.by_kind.get("*")
+        steps = self.steps()
+        if window.kind in steps:
+            return steps[window.kind]
+        if window.grouped > 1 and "group" in steps:
+            return steps["group"]
+        return steps.get("*")
 
     def __call__(self, pad: "Pad", press: Press) -> None:
         if press.window is None:
@@ -1025,12 +1427,122 @@ class keys:
     @property
     def probes(self) -> list[str]:
         # address 0x0 is never a window, and building a dispatcher runs nothing anyway
-        return [f"local _ = {k.expr('0x0') if isinstance(k, Key) else k}" for step in self.by_kind.values()
+        return [f"local _ = {k.expr('0x0') if isinstance(k, Key) else k}" for step in self.steps().values()
                 for k in ([step] if isinstance(step, str) else step)]
 
     @property
     def keysyms(self) -> list[str]:
-        return [k.key for step in self.by_kind.values() if not isinstance(step, str) for k in step]
+        return [k.key for step in self.steps().values() if not isinstance(step, str) for k in step]
+
+    @property
+    def kinds(self) -> list[str]:
+        """The window kinds it does something in, for the map."""
+        return sorted(kind for kind, step in self.steps().items() if step)
+
+    @property
+    def kind_labels(self) -> dict[str, str]:
+        """herdr's words from [herdr.labels], when herdr has a key for it."""
+        if not self.herdr or not herdr_step(self.herdr):
+            return {}
+        return {"herdr": getattr(CONFIG.herdr.labels, self.herdr)}
+
+
+@dataclass(frozen=True)
+class jump_to:
+    """Triangle, as [jump].backend says: herdr's own jump key to a herdr window (elsewhere a note says
+    where it works), the command's list of agents (Jump), or nothing."""
+
+    def chords(self) -> tuple[Key, ...]:
+        return herdr_step("jump") if CONFIG.jump.backend == "herdr" else ()
+
+    def __call__(self, pad: "Pad", press: Press) -> None:
+        if CONFIG.jump.backend == "command":
+            pad.jump.press()
+            return
+        chords = self.chords()
+        if not chords:
+            return
+        window = pad.windows.active()
+        if window is None or window.kind != "herdr":
+            pad.fx.notify("Triangle jumps inside herdr")
+            return
+        for key in chords:
+            if not pad.hypr.dispatch(key.expr(window.address)):
+                break
+
+    @property
+    def probes(self) -> list[str]:
+        return [f"local _ = {k.expr('0x0')}" for k in self.chords()]
+
+    @property
+    def keysyms(self) -> list[str]:
+        return [k.key for k in self.chords()]
+
+    @property
+    def kinds(self) -> list[str]:
+        return ["herdr"] if CONFIG.jump.backend == "herdr" else ["*"]
+
+
+def jump_label(label: str) -> str:
+    if CONFIG.jump.backend == "herdr":
+        return CONFIG.herdr.labels.jump if herdr_step("jump") else ""
+    return label if CONFIG.jump.backend == "command" else ""
+
+
+def shell_line(argv: tuple[str, ...]) -> str:
+    """argv as one shell line: every argument in single quotes, the program only when it needs them."""
+    return " ".join([shlex.quote(argv[0])] + ["'" + arg.replace("'", "'\"'\"'") + "'" for arg in argv[1:]])
+
+
+def lua_long(text: str) -> str:
+    """text as a Lua long string, [[...]] with as many = as it takes that nothing inside closes it."""
+    level = 0
+    while f"]{'=' * level}]" in text or text.endswith("]" + "=" * level):
+        level += 1
+    return f"[{'=' * level}[{text}]{'=' * level}]"
+
+
+@dataclass(frozen=True)
+class run_board:
+    """PS tap: [board].command, run through Hyprland's exec as a key's exec is (it outlives the
+    daemon); nothing when there is none."""
+
+    def expr(self) -> str | None:
+        argv = CONFIG.board.command
+        return f"hl.dsp.exec_cmd({lua_long(shell_line(argv))})" if argv else None
+
+    def __call__(self, pad: "Pad", press: Press) -> None:
+        expr = self.expr()
+        if expr:
+            pad.hypr.dispatch(expr)
+
+    @property
+    def probes(self) -> list[str]:
+        expr = self.expr()
+        return [f"local _ = {expr}"] if expr else []
+
+
+WHEEL_LABEL = "Hold: the sessions wheel (right stick aims, let go jumps)"
+
+
+def board_label(label: str) -> str:
+    """PS: the tap's words ([board].label, else "Tap: the board"), then the hold's, each when set up."""
+    tap = (CONFIG.board.label or "Tap: the board") if CONFIG.board.command else ""
+    hold = WHEEL_LABEL if CONFIG.wheel.plugin else ""
+    return ". ".join(part for part in (tap, hold) if part)
+
+
+def run_ideas(pad: "Pad", press: Press) -> None:
+    """Create: [ideas].command; when there is none, a note says so, once."""
+    if not CONFIG.ideas.command:
+        pad.note_once("ideas", "Create is not set up", "see [ideas] in the config")
+        return
+    pad.fx.rumble("tick")
+    pad.runner.spawn(list(CONFIG.ideas.command))
+
+
+def if_talk(label: str) -> str:
+    return "" if CONFIG.talk.backend == "none" else label
 
 
 # Workspaces on this screen are omaspaces' when it is loaded (~/.config/hypr/split-workspaces.lua:
@@ -1047,31 +1559,26 @@ STEP_PROBE = (
     'local _ = hl.dsp.focus({ workspace = "m+1" })'
 )
 
-def spawn(*argv: str) -> Callable[["Pad", Press], None]:
-    def run(pad: "Pad", press: Press) -> None:
-        pad.fx.rumble("tick")
-        pad.runner.spawn(list(argv))
-    return run
-
-
 ACTIONS: dict[str, Action] = {
     "talk": Action("Hold to talk, let go to paste; a tap keeps listening",
-                   lambda pad, press: pad.talk.press(), release=lambda pad, press: pad.talk.release()),
+                   lambda pad, press: pad.talk.press(), release=lambda pad, press: pad.talk.release(),
+                   live_label=if_talk),
     # The mic button: a press and an instant let-go, which Talk reads as a tap (it keeps listening);
     # the next press ends it and pastes.
     "talk_toggle": Action("Talk: a press starts, the next press pastes",
-                          lambda pad, press: (pad.talk.press(), pad.talk.release())),
-    "ideas": Action("Voice ideas listener on / off", spawn("voice-ideas-toggle")),
-    "jump": Action("Show the agent that waits on you; again: the next", lambda pad, press: pad.jump.press()),
+                          lambda pad, press: (pad.talk.press(), pad.talk.release()), live_label=if_talk),
+    "ideas": Action("Voice ideas listener on / off", run_ideas,
+                    live_label=lambda label: label if CONFIG.ideas.command else ""),
+    "jump": Action("Show the agent that waits on you; again: the next", jump_to(), live_label=jump_label),
     "map": Action("Held: this map. Tapped: it stays up until the next tap",
                   lambda pad, press: pad.map.press(press.window.kind if press.window else "other", press.layer,
                                                    bool(press.window and press.window.grouped > 1)),
                   window=True, release=lambda pad, press: pad.map.release()),
-    # The Sun board's own key (Super+Ctrl+Shift+Return): raise its one window, or open it.
-    "board": Action("Tap: the Sun board. Hold: the sessions wheel (right stick aims, let go jumps)",
-                    dispatch("hl.dsp.exec_cmd([[omarchy-launch-or-focus-webapp 'Sun board' 'http://127.0.0.1:7741/']])"),
+    # PS: a tap runs [board].command (a board app's launcher: raise its one window, or open it); a
+    # hold opens [wheel].plugin's wheel.
+    "board": Action(f"Tap: the board. {WHEEL_LABEL}", run_board(),
                     tap=True, hold=lambda pad, press: pad.sessions.open(),
-                    release=lambda pad, press: pad.sessions.release()),
+                    release=lambda pad, press: pad.sessions.release(), live_label=board_label),
     "enter": Action("Enter: send, confirm", keys({"*": chord("", "Return")}), window=True),
     "escape": Action("Esc: back, stop the agent", keys({"*": chord("", "Escape")}), window=True),
     "mode": Action("Shift+Tab: the agent's mode", keys({"*": chord("SHIFT", "Tab")}), window=True),
@@ -1091,29 +1598,27 @@ ACTIONS: dict[str, Action] = {
     "size_up": Action("Bigger text", keys({"*": chord("CTRL", "equal")}), "slow", window=True),
     "size_down": Action("Smaller text", keys({"*": chord("CTRL", "minus")}), "slow", window=True),
     "size_normal": Action("Normal text size", keys({"*": chord("CTRL", "0")}), window=True),
-    # herdr's own chords (~/.config/herdr/config.toml): Alt+Left/Right tab,
-    # Alt+Up/Down workspace (a "space"), Alt+Shift+Up/Down agent. The board's:
-    # [ ] tab, Alt+Up/Down agent, Tab / Shift+Tab tile (keys.js).
-    "tab_prev": Action("Previous tab", keys({"herdr": chord("ALT", "Left"), "browser": chord("CTRL SHIFT", "Tab"),
-                                             "board": chord("", "bracketleft"), "group": "hl.dsp.group.prev()"}),
-                       "slow", window=True, labels={"herdr": "Previous herdr tab", "browser": "Previous browser tab",
-                                                    "board": "Previous board tab", "group": "Previous tab of the group"}),
-    "tab_next": Action("Next tab", keys({"herdr": chord("ALT", "Right"), "browser": chord("CTRL", "Tab"),
-                                         "board": chord("", "bracketright"), "group": "hl.dsp.group.next()"}),
-                       "slow", window=True, labels={"herdr": "Next herdr tab", "browser": "Next browser tab",
-                                                    "board": "Next board tab", "group": "Next tab of the group"}),
-    "agent_prev": Action("Previous agent", keys({"herdr": chord("ALT SHIFT", "Up"), "board": chord("ALT", "Up")}),
+    # herdr's chords and its words on the map come from [herdr.keys] and [herdr.labels]. A board's
+    # (a window [windows].board_titles names): [ ] tab, Alt+Up/Down agent, Tab / Shift+Tab tile.
+    "tab_prev": Action("Previous tab", keys({"browser": chord("CTRL SHIFT", "Tab"), "board": chord("", "bracketleft"),
+                                             "group": "hl.dsp.group.prev()"}, herdr="tab_prev"),
+                       "slow", window=True, labels={"browser": "Previous browser tab", "board": "Previous board tab",
+                                                    "group": "Previous tab of the group"}),
+    "tab_next": Action("Next tab", keys({"browser": chord("CTRL", "Tab"), "board": chord("", "bracketright"),
+                                         "group": "hl.dsp.group.next()"}, herdr="tab_next"),
+                       "slow", window=True, labels={"browser": "Next browser tab", "board": "Next board tab",
+                                                    "group": "Next tab of the group"}),
+    "agent_prev": Action("Previous agent", keys({"board": chord("ALT", "Up")}, herdr="agent_prev"),
                          "slow", window=True),
-    "agent_next": Action("Next agent", keys({"herdr": chord("ALT SHIFT", "Down"), "board": chord("ALT", "Down")}),
+    "agent_next": Action("Next agent", keys({"board": chord("ALT", "Down")}, herdr="agent_next"),
                          "slow", window=True),
-    "space_prev": Action("Previous herdr space; browser back", keys({"herdr": chord("ALT", "Up"), "browser": chord("ALT", "Left"),
-                                                                     "board": chord("SHIFT", "Tab")}),
-                         "slow", window=True, labels={"herdr": "Previous herdr space", "browser": "Back",
-                                                      "board": "The tile before"}),
-    "space_next": Action("Next herdr space; browser forward", keys({"herdr": chord("ALT", "Down"), "browser": chord("ALT", "Right"),
-                                                                    "board": chord("", "Tab")}),
-                         "slow", window=True, labels={"herdr": "Next herdr space", "browser": "Forward",
-                                                      "board": "The tile after"}),
+    "space_prev": Action("Previous herdr space; browser back",
+                         keys({"browser": chord("ALT", "Left"), "board": chord("SHIFT", "Tab")}, herdr="space_prev"),
+                         "slow", window=True, labels={"browser": "Back", "board": "The tile before"}),
+    "space_next": Action("Next herdr space; browser forward",
+                         keys({"browser": chord("ALT", "Right"), "board": chord("", "Tab")}, herdr="space_next"),
+                         "slow", window=True, labels={"browser": "Forward", "board": "The tile after"}),
+    "zoom": Action("Zoom the herdr pane", keys({}, herdr="zoom"), window=True),
     "focus_left": Action("Focus the window to the left", dispatch('hl.dsp.focus({ direction = "l" })'), "slow"),
     "focus_right": Action("Focus the window to the right", dispatch('hl.dsp.focus({ direction = "r" })'), "slow"),
     "focus_up": Action("Focus the window above", dispatch('hl.dsp.focus({ direction = "u" })'), "slow"),
@@ -1151,6 +1656,12 @@ LAYOUT: dict[str, dict[str, str]] = {
     },
 }
 LAYER_NAMES = {"base": "Inside the window", "world": "L2 held: the desktop"}
+
+
+def layout(layer: str) -> dict[str, str]:
+    """LAYOUT's side with [layout.<side>]'s changes; a control set to "" does nothing."""
+    merged = {**LAYOUT[layer], **getattr(CONFIG.layout, layer)}
+    return {control: action for control, action in merged.items() if action}
 CONTROL_NAMES = {
     "rstick": "Right stick", "chord": "PS + Options", "mic": "Mic button",
     "up": "D-pad up", "down": "D-pad down", "left": "D-pad left", "right": "D-pad right",
@@ -1187,7 +1698,7 @@ class Pad:
         self.hypr, self.fx, self.clock = hypr, fx, clock
         self.windows = windows or Windows(hypr)
         self.runner = runner or Runner()
-        self.talk = Talk(self.runner, fx, clock, voice or voice_dir())
+        self.talk = make_talk(self.runner, fx, clock, voice)
         self.jump = Jump(self.runner, fx, clock)
         self.scroll = Scroll(hypr, wheel or Wheel(), clock)
         self.sessions = SessionsWheel(hypr, fx, clock)
@@ -1204,6 +1715,7 @@ class Pad:
         self.stick = {"left": [0.0, 0.0], "right": [0.0, 0.0]}
         self.flicked: str | None = None
         self.rflicked: str | None = None   # the right stick's flick, in the world layer
+        self.noted: set[str] = set()       # notes said once: what is not set up
 
     def feed(self, etype: int, code: int, value: int) -> None:
         if etype == EV_KEY:
@@ -1309,7 +1821,7 @@ class Pad:
         if control == "circle" and (self.talk.drop() or self.sessions.cancel()):
             return  # Circle while talking drops the recording, with the wheel open closes it; not Esc
         layer = "world" if self.world else "base"
-        name = LAYOUT[layer].get(control)
+        name = layout(layer).get(control)
         if name is None:
             return
         action = ACTIONS[name]
@@ -1358,6 +1870,11 @@ class Pad:
             if press.next_at is not None and now >= press.next_at:
                 press.next_at = now + repeat_gap(press.action.repeat, now - press.started)
                 self.run(press)
+
+    def note_once(self, what: str, title: str, body: str = "") -> None:
+        if what not in self.noted:
+            self.noted.add(what)
+            self.fx.notify(title, body)
 
     def run(self, press: Press) -> None:
         log.debug("%s %s -> %s", press.layer, press.control, press.action.label)
@@ -1816,12 +2333,16 @@ MAP_EXTRA = {
 
 def map_rows(layer: str) -> list[dict[str, Any]]:
     rows = []
+    bound = layout(layer)
     for group, controls in MAP_GROUPS:
         for control in controls:
-            if control in LAYOUT[layer]:
-                action = ACTIONS[LAYOUT[layer][control]]
-                label, labels = action.label, dict(action.labels or {})
-                kinds = sorted(action.run.by_kind) if isinstance(action.run, keys) else ["*"]
+            if control in bound:
+                action = ACTIONS[bound[control]]
+                label = action.live_label(action.label) if action.live_label else action.label
+                if not label:
+                    continue  # not set up in the config: it does nothing
+                labels = {**(action.labels or {}), **getattr(action.run, "kind_labels", {})}
+                kinds = list(getattr(action.run, "kinds", ["*"]))
             elif control in MAP_EXTRA[layer]:
                 label, labels, kinds = MAP_EXTRA[layer][control], {}, ["*"]
             else:
@@ -1859,9 +2380,10 @@ def print_map(as_json: bool) -> None:
 def check(hypr: Hypr) -> int:
     """Builds every action's dispatcher in the running Hyprland without running one. 0 = all build."""
     failed = 0
-    extra = {"scroll_pointer": POINTER_TO.format(x=0, y=0),  # dispatchers that are not a control's
-             "sessions_wheel": f'hl.dsp.event("{WHEEL_ID} cancel")',
-             "map": f'hl.dsp.event("{MAP_ID} hide")'}
+    extra = {"scroll_pointer": POINTER_TO.format(x=0, y=0)}  # dispatchers that are not a control's
+    if CONFIG.wheel.plugin:
+        extra["sessions_wheel"] = f'hl.dsp.event("{CONFIG.wheel.plugin} cancel")'
+    extra["map"] = f'hl.dsp.event("{MAP_ID} hide")'
     for name, expr in extra.items():
         answer = hypr.request(f"eval local _ = {expr}")
         ok = answer is not None and answer.strip() == "ok"
@@ -1877,7 +2399,7 @@ def check(hypr: Hypr) -> int:
         # red error bar on the screen; so the names are checked here, in libxkbcommon itself.
         problems += [f"{sym} is not a key name" for sym in getattr(action.run, "keysyms", []) if not keysym_known(sym)]
         if not hasattr(action.run, "probes"):
-            continue  # not Hyprland's (talk, ideas, jump, map)
+            continue  # not Hyprland's (talk, ideas, map)
         failed += bool(problems)
         print(f"{'FAIL' if problems else 'ok  '} {name}{': ' + '; '.join(problems) if problems else ''}")
     return 1 if failed else 0
@@ -1922,25 +2444,49 @@ def print_status() -> None:
 
 
 def main(argv: list[str] | None = None) -> int:
-    parser = argparse.ArgumentParser(prog="hypr-gamepad", description="The DualSense drives Hyprland.")
+    global CONFIG
+    parser = argparse.ArgumentParser(prog="hypr-gamepad", description="A gamepad drives Hyprland.")
     sub = parser.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run", help="the daemon")
     run.add_argument("--dry", action="store_true", help="print actions instead of sending them")
     run.add_argument("--device", help="this event node instead of the first DualSense found")
-    sub.add_parser("status", help="the pad, its battery, Hyprland")
-    sub.add_parser("check", help="build every action in the running Hyprland without running it")
+    status = sub.add_parser("status", help="the pad, its battery, Hyprland, the config")
+    check_it = sub.add_parser("check", help="read the config, and build every action in the running Hyprland "
+                                            "without running it")
     show = sub.add_parser("map", help="what each control does")
     show.add_argument("--json", action="store_true")
+    for command in (run, status, check_it, show):
+        command.add_argument("--config", metavar="PATH",
+                             help=f"the config file (default {default_config_path()}; none there: the defaults)")
     args = parser.parse_args(argv)
+    logging.basicConfig(level=logging.INFO if args.cmd == "run" else logging.WARNING,
+                        format="hypr-gamepad: %(message)s")
+
+    source = Path(args.config) if args.config else default_config_path()
+    try:
+        CONFIG, warnings = read_config(args.config)
+    except ConfigError as exc:
+        if args.cmd == "check":
+            print(f"FAIL config: {exc}")
+            return 1
+        log.error("%s", exc)
+        return 2
+    if args.cmd == "check":  # check says it all on stdout, the config first
+        for warning in warnings:
+            print(f"warn config: {warning}")
+        print(f"ok   config: {source}{'' if source.exists() else ' (none: the defaults)'}")
+    else:
+        for warning in warnings:
+            log.warning("%s", warning)
 
     if args.cmd == "map":
         print_map(args.json)
     elif args.cmd == "status":
         print_status()
+        print(f"config: {source}{'' if source.exists() else ' (none: the defaults)'}")
     elif args.cmd == "check":
         return check(Hypr())
     else:
-        logging.basicConfig(level=logging.INFO, format="hypr-gamepad: %(message)s")
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         run_daemon(args.dry, args.device)
     return 0
