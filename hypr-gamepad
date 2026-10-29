@@ -118,6 +118,7 @@ import select
 import shlex
 import signal
 import socket
+import struct
 import subprocess
 import sys
 import tempfile
@@ -534,6 +535,65 @@ def driver_of(path: str, sysfs: str = "/sys") -> str:
     virtual device, which has none."""
     link = Path(sysfs, "class", "input", os.path.basename(path), "device", "device", "driver")
     return Path(os.path.realpath(link)).name if link.is_symlink() else ""
+
+
+@dataclass(frozen=True)
+class Device:
+    """One input device as sysfs shows it (/sys/class/input/eventN/device), never opened: closing an
+    opened one waits on the kernel (evdev_release; 645 ms for 43 devices on a test machine)."""
+
+    path: str                # /dev/input/eventN
+    name: str
+    vendor: int
+    product: int
+    driver: str
+    keys: frozenset[int]
+    axes: frozenset[int]
+
+    @property
+    def gamepad(self) -> bool:
+        return is_gamepad(set(self.keys), set(self.axes))
+
+
+LONG_BITS = struct.calcsize("l") * 8  # sysfs prints a capability bitmap in the kernel's longs
+
+
+def bitmap(text: str) -> set[int]:
+    """A sysfs capability bitmap ("7fdb000000000000 0 0 0 0": longs, the highest first) as its codes."""
+    codes: set[int] = set()
+    for index, word in enumerate(reversed(text.split())):
+        value = int(word, 16)
+        while value:
+            low = value & -value
+            codes.add(index * LONG_BITS + low.bit_length() - 1)
+            value ^= low
+    return codes
+
+
+def scan(sysfs: str = "/sys", only: str | None = None) -> list[Device]:
+    """Every input device, or the event node `only` (eventN), in event order; one that goes away while
+    it is read is left out."""
+    where = Path(sysfs, "class", "input")
+    events = [only] if only else sorted((p.name for p in where.glob("event*")), key=event_number)
+    devices = []
+    for event in events:
+        base = where / event / "device"
+        try:
+            name = (base / "name").read_text().strip()
+            vendor, product = (int((base / "id" / part).read_text(), 16) for part in ("vendor", "product"))
+            keys, axes = (bitmap((base / "capabilities" / part).read_text()) for part in ("key", "abs"))
+        except (OSError, ValueError):
+            continue
+        devices.append(Device(f"/dev/input/{event}", name, vendor, product, driver_of(event, sysfs),
+                              frozenset(keys), frozenset(axes)))
+    return devices
+
+
+def scan_profile(device: Device) -> Profile:
+    """A pad's profile from sysfs alone: its names, family and chord are all there; its axes' ranges
+    are not (the map needs none of them)."""
+    return profile_for(device.name, device.vendor, device.product, device.driver, set(device.keys),
+                       {code: (0, 0) for code in device.axes}, CONFIG.device.family)
 
 
 def event_number(path: str) -> int:
@@ -2346,29 +2406,21 @@ class MicReader:
         self.fd = None
 
 
-def find_pad(path: str | None = None) -> Any:
+def find_pad(path: str | None = None, sysfs: str = "/sys") -> Any:
     """The pad, opened: the device at `path` or, with none, the first gamepad by event number; or the
-    one [device] name names (pick_pad). Every device looked at is closed again."""
+    one [device] name names (pick_pad). Read from sysfs, so the pad is the one device opened; a pad
+    that will not open (no access) gives way to the next."""
     import evdev
 
-    seen = []
-    for candidate in [path] if path else evdev.list_devices():
+    only = os.path.basename(os.path.realpath(path)) if path else None
+    seen = [(device.path, device.name, device.gamepad) for device in scan(sysfs, only)]
+    while (chosen := pick_pad(seen, CONFIG.device.name)) is not None:
         try:
-            dev = evdev.InputDevice(candidate)
-        except OSError:
-            continue
-        try:
-            caps = dev.capabilities(absinfo=False)
-            seen.append((candidate, dev.name, is_gamepad(set(caps.get(EV_KEY, [])), set(caps.get(EV_ABS, [])))))
-        finally:
-            dev.close()
-    chosen = pick_pad(seen, CONFIG.device.name)
-    if chosen is None:
-        return None
-    try:
-        return evdev.InputDevice(chosen)
-    except OSError:
-        return None
+            return evdev.InputDevice(chosen)
+        except OSError as exc:
+            log.debug("%s: %s", chosen, exc)
+            seen = [entry for entry in seen if entry[0] != chosen]
+    return None
 
 
 def profile_of(dev: Any) -> Profile:
