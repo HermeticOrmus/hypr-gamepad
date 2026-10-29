@@ -422,6 +422,109 @@ class Reading(PadCase):
         self.assertTrue(pad.world)
 
 
+class Names(PadCase):
+    """Each family's own names, on the map and in the notes: what is printed on the pad in the hand."""
+
+    def test_each_family_names_its_controls(self):
+        controls = ("south", "east", "west", "north", "l1", "r1", "l2", "r2", "l3", "r3", "select", "start",
+                    "home", "capture")
+        for shape, names in ((XBOX_ONE, ["A", "B", "X", "Y", "LB", "RB", "LT", "RT", "LS", "RS", "View", "Menu",
+                                         "Xbox", "Share"]),
+                             (PRO, ["B", "A", "Y", "X", "L", "R", "ZL", "ZR", "LS", "RS", "Minus", "Plus",
+                                    "Home", "Capture"]),
+                             (NO_HOME, ["South", "East", "West", "North", "L1", "R1", "L2", "R2", "L3", "R3",
+                                        "Select", "Start", "Home", "Capture"]),
+                             (DUALSENSE, ["Cross", "Circle", "Square", "Triangle", "L1", "R1", "L2", "R2", "L3",
+                                          "R3", "Create", "Options", "PS", "Capture"])):
+            found = profile(shape)
+            self.assertEqual([found.name_of(c) for c in controls], names, shape["name"])
+        self.assertEqual(profile(dict(DUALSENSE, product=0x09CC)).name_of("select"), "Share")  # a DualShock 4
+        self.assertEqual(profile(DUALSENSE).name_of("ls_up"), "Left stick up")
+
+    def test_the_chord_is_named_as_the_pad_names_it(self):
+        self.assertEqual(profile(DUALSENSE).chord_name(), "PS + Options")
+        self.assertEqual(profile(XBOX_360).chord_name(), "Xbox + Menu")
+        self.assertEqual(profile(NO_HOME).chord_name(), "Select + Start")
+
+    def test_the_map_shows_the_pads_names(self):
+        xbox = profile(XBOX_360)
+        rows = {r["control"]: r for r in hg.map_rows("base", xbox)}
+        self.assertEqual([(rows[c]["glyph"], rows[c]["name"]) for c in ("south", "west", "north")],
+                         [("", "A"), ("", "X"), ("", "Y")])
+        self.assertEqual(rows["l1"]["name"], "LB")
+        world = {r["control"]: r for r in hg.map_rows("world", xbox)}
+        self.assertEqual(world["chord"]["name"], "Xbox + Menu")
+        self.assertEqual(hg.layer_names(xbox)["world"], "LT held: the desktop")
+        ds = {r["control"]: r for r in hg.map_rows("base", hg.Profile())}
+        self.assertEqual((ds["south"]["glyph"], ds["south"]["name"]), ("\u2715", "Cross"))
+        self.assertEqual(hg.layer_names(hg.Profile())["world"], "L2 held: the desktop")
+
+    def test_notes_name_the_pressed_control_as_the_pad_does(self):
+        pad = self.pad(XBOX_360)
+        self.key(pad, BTN_WEST)                                        # Y: north, the jump; no herdr window
+        self.key(pad, BTN_SELECT)                                      # View: ideas, not set up
+        pad.feed(EV_KEY, BTN_MODE, 1)
+        pad.feed(EV_KEY, BTN_START, 1)                                 # Xbox + Menu: game mode
+        self.assertEqual(self.fx.notes, ["Y jumps inside herdr: ", "View is not set up: see [ideas] in the config",
+                                         "Game mode: The pad is the game's. Xbox + Menu brings it back."])
+
+    def test_the_map_command_names_a_family_on_request(self):
+        import json
+        import subprocess
+        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--json", "--pad", "nintendo"],
+                              capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 0, proc.stderr)
+        doc = json.loads(proc.stdout)
+        rows = {r["control"]: r for r in doc["layers"]["base"]}
+        self.assertEqual((rows["south"]["name"], rows["east"]["name"]), ("B", "A"))
+        self.assertEqual(doc["layer_names"]["world"], "ZL held: the desktop")
+        proc = subprocess.run([sys.executable, str(SCRIPT), "map", "--pad", "sega"], capture_output=True,
+                              text=True, timeout=10)
+        self.assertNotEqual(proc.returncode, 0)
+
+
+class ReadyNote(unittest.TestCase):
+    def note(self, found: "hg.Profile", mode: str = "desk") -> str:
+        notes = []
+
+        class Stop(Exception):
+            pass
+
+        class Motors(Fx):
+            def __init__(self, dev, dry=False):
+                super().__init__()
+                self.notes = notes
+
+        class Dev:
+            uniq, path, name = "", "/dev/input/event30", found.name
+
+            class info:
+                vendor, product = found.vendor, found.product
+
+            def close(self):
+                pass
+
+        def serve(dev, pad, motors, mic=None):
+            raise Stop
+
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        from unittest import mock
+        with mock.patch.multiple(hg, find_pad=lambda path=None: Dev(), serve=serve, Motors=Motors,
+                                 profile_of=lambda dev: found, input_dir=lambda dev: str(tmp),
+                                 DryHypr=lambda: Hypr(), voice_dir=lambda: tmp), \
+                mock.patch.object(hg.time, "sleep"), self.assertRaises(Stop):
+            hg.run_daemon(True, None)
+        return notes[0]
+
+    def test_a_dualsense_says_what_it_always_said(self):
+        self.assertEqual(self.note(hg.Profile()), "DualSense ready: Battery unknown. Hold L2 for the desktop.")
+
+    def test_another_pad_says_its_name_and_its_trigger(self):
+        self.assertEqual(self.note(profile(XBOX_360)),
+                         "Microsoft X-Box 360 pad ready: Battery unknown. Hold LT for the desktop.")
+
+
 class DeviceConfig(unittest.TestCase):
     def test_the_device_table(self):
         tmp = Path(tempfile.mkdtemp())
