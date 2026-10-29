@@ -2,7 +2,9 @@
 """hypr-gamepad: a gamepad drives Hyprland.
 
 The aim: herdr's agents, voice-to-text dictation, and every window, tab, herdr pane and workspace,
-driven from the controller alone, with the hands off the keyboard. Made for the DualSense.
+driven from the controller alone, with the hands off the keyboard. Made for the DualSense; any pad the
+kernel calls a gamepad works ([device] picks one, `status` says how it is read), and the controls
+below go by the DualSense's names.
 
     hypr-gamepad run [--dry] [--device PATH]   the daemon; hypr-gamepad.service runs it
     hypr-gamepad status                        the pad, its battery, Hyprland, the config file
@@ -127,15 +129,15 @@ from typing import Any, Callable, Protocol
 
 log = logging.getLogger("hypr-gamepad")
 
-PAD_NAMES = {"DualSense Wireless Controller", "DualSense Edge Wireless Controller"}
 BATTERY = "/sys/class/power_supply/ps-controller-battery-{mac}"
 
 # Kernel input codes (linux/input-event-codes.h). python-evdev is imported only where the pad is
 # opened, so this file loads where evdev is missing (the tests run on machines without it).
 EV_SYN, EV_KEY, EV_ABS = 0x00, 0x01, 0x03
 SYN_REPORT, SYN_DROPPED = 0, 3
-ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_HAT0X, ABS_HAT0Y = 0x00, 0x01, 0x03, 0x04, 0x10, 0x11
-AXES = (ABS_X, ABS_Y, ABS_RX, ABS_RY, ABS_HAT0X, ABS_HAT0Y)
+ABS_X, ABS_Y, ABS_Z, ABS_RX, ABS_RY, ABS_RZ = 0x00, 0x01, 0x02, 0x03, 0x04, 0x05
+ABS_GAS, ABS_BRAKE, ABS_HAT0X, ABS_HAT0Y, ABS_HAT2X, ABS_HAT2Y = 0x09, 0x0A, 0x10, 0x11, 0x14, 0x15
+BTN_SOUTH, BTN_Z, BTN_TL2, BTN_TR2, KEY_RECORD = 0x130, 0x135, 0x138, 0x139, 0xA7
 # The buttons by where they sit on the pad, as the kernel's gamepad spec names their codes
 # (Documentation/input/gamepad.rst): the face buttons south, east, west, north, whatever is printed on
 # them (on a DualSense: Cross, Circle, Square, Triangle); select, start and home in the middle
@@ -149,9 +151,27 @@ BUTTONS = {
 # and east on a Nintendo one.
 CONTROL_ALIASES = {"cross": "south", "circle": "east", "square": "west", "triangle": "north",
                    "create": "select", "options": "start", "ps": "home"}
-STICKS = {ABS_X: ("left", 0), ABS_Y: ("left", 1), ABS_RX: ("right", 0), ABS_RY: ("right", 1)}
+# The D-pad as four buttons (BTN_DPAD_*), on pads that send no hat: hid-nintendo's on older kernels
+# and the Joy-Con, xpad's wireless 360 receivers.
+DPAD_BUTTONS = {0x220: "up", 0x221: "down", 0x222: "left", 0x223: "right"}
+# Families: what is printed on the pad. The driver says it first, the maker's USB id next.
+FAMILIES = ("playstation", "xbox", "nintendo", "generic")
+FAMILY_DRIVERS = {"playstation": "playstation", "sony": "playstation", "xpad": "xbox", "microsoft": "xbox",
+                  "nintendo": "nintendo"}
+FAMILY_VENDORS = {0x054C: "playstation", 0x045E: "xbox", 0x057E: "nintendo"}
+FAMILY_BUTTONS = {
+    # xpad sends a button by its label: X as BTN_X and Y as BTN_Y, which the kernel's header makes
+    # BTN_NORTH and BTN_WEST, though on an Xbox pad X sits west and Y north (Microsoft's Bluetooth
+    # descriptor does the same). The Share button is KEY_RECORD.
+    "xbox": {0x133: "west", 0x134: "north", KEY_RECORD: "capture"},
+    "nintendo": {BTN_Z: "capture"},
+}
+STICK_ROLES = {"lx": ("left", 0), "ly": ("left", 1), "rx": ("right", 0), "ry": ("right", 1)}
 LAYER_KEY = "l2"  # held: the world layer
-GAME_CHORD = {"home", "start"}  # together: game mode on / off
+GAME_CHORD = frozenset({"home", "start"})  # together: game mode on / off
+# A trigger read from its axis (a pad with no trigger buttons) presses past this much of its travel
+# and lets go under the second, so a finger resting on it does not chatter.
+TRIGGER_ON, TRIGGER_OFF = 0.5, 0.3
 
 # A stick flick engages past FLICK_ON and lets go under FLICK_OFF (of full tilt), so a stick that
 # rests near the edge does not chatter.
@@ -176,6 +196,12 @@ def repeat_gap(profile: str, held: float) -> float:
 # herdr's, herdr's keys and the layout. Each table is a frozen dataclass whose defaults are a friend's:
 # herdr 0.9.5's own keys, voice-flow for talk, nothing of any one desk. CONFIG is read when an action
 # runs, never when this file loads, so tests swap it.
+
+@dataclass(frozen=True)
+class DeviceConfig:
+    name: str = ""                               # the pad whose name holds this; "" = the first gamepad
+    family: str = ""                             # playstation | xbox | nintendo | generic; "" = its own
+
 
 @dataclass(frozen=True)
 class TalkConfig:
@@ -265,6 +291,7 @@ class LayoutConfig:
 
 @dataclass(frozen=True)
 class Config:
+    device: DeviceConfig = field(default_factory=DeviceConfig)
     talk: TalkConfig = field(default_factory=TalkConfig)
     jump: JumpConfig = field(default_factory=JumpConfig)
     board: BoardConfig = field(default_factory=BoardConfig)
@@ -352,6 +379,8 @@ def build(cls: type, table: Any, where: str, warnings: list[str]) -> Any:
 
 def validate(config: Config) -> None:
     """What the types do not say: the backends, what each needs, herdr's keys, the layout's names."""
+    if config.device.family and config.device.family not in FAMILIES:
+        raise ConfigError(f"device.family: {config.device.family!r} is not one of {', '.join(FAMILIES)}")
     for name, value, choices in (("talk.backend", config.talk.backend, TALK_BACKENDS),
                                  ("jump.backend", config.jump.backend, JUMP_BACKENDS)):
         if value not in choices:
@@ -393,6 +422,134 @@ def bindable(layer: str) -> set[str]:
     window (it flicks only on the desktop side), and the chord belongs to game mode."""
     controls = set(CONTROL_NAMES) - {LAYER_KEY, "rstick", "chord"}
     return controls if layer == "world" else controls - {"rs_up", "rs_down"}
+
+
+# --- The pad: which code is which control ----------------------------------------------------------
+
+@dataclass(frozen=True)
+class Axis:
+    """One axis of the pad: what it is (lx ly rx ry a stick; l2 r2 a trigger read as a button; hatx
+    haty the D-pad) and its range, from the kernel's absinfo."""
+
+    role: str
+    low: int
+    high: int
+
+    def tilt(self, value: int) -> float:
+        """A stick, -1 to 1 around its centre: a DualSense's 0..255 gives (value - 128) / 127 as it
+        always did, xpad's -32768..32767 value / 32767."""
+        centre = (self.low + self.high + 1) // 2
+        half = self.high - centre
+        return max(-1.0, min(1.0, (value - centre) / half)) if half > 0 else 0.0
+
+    def travel(self, value: int) -> float:
+        """A trigger, 0 at rest to 1 pressed fully."""
+        span = self.high - self.low
+        return max(0.0, min(1.0, (value - self.low) / span)) if span > 0 else 0.0
+
+
+def dualsense_axes() -> dict[int, Axis]:
+    stick = {ABS_X: "lx", ABS_Y: "ly", ABS_RX: "rx", ABS_RY: "ry"}
+    return {**{code: Axis(role, 0, 255) for code, role in stick.items()},
+            ABS_HAT0X: Axis("hatx", -1, 1), ABS_HAT0Y: Axis("haty", -1, 1)}
+
+
+@dataclass(frozen=True)
+class Profile:
+    """A pad as hypr-gamepad reads it: which code is which control, which axis is which stick,
+    trigger or D-pad, the family its names come from, and its game mode chord. The default is a
+    DualSense, the pad hypr-gamepad was built on; profile_for reads any other."""
+
+    name: str = "DualSense Wireless Controller"
+    family: str = "playstation"
+    vendor: int = 0x054C
+    product: int = 0x0CE6
+    buttons: dict[int, str] = field(default_factory=lambda: dict(BUTTONS))
+    axes: dict[int, Axis] = field(default_factory=dualsense_axes)
+    chord: frozenset[str] = GAME_CHORD
+
+    def describe(self) -> str:
+        """One log line: what the daemon makes of the pad."""
+        roles = {axis.role: code for code, axis in self.axes.items()}
+        triggers = "axes" if "l2" in roles or "r2" in roles else "buttons"
+        dpad = "hat" if "hatx" in roles else ("buttons" if set(DPAD_BUTTONS) & set(self.buttons) else "none")
+        right = {ABS_RX: "rx/ry", ABS_Z: "z/rz"}.get(roles.get("rx", -1), "none")
+        return (f"{self.name} ({self.family}): {len(self.buttons)} buttons, right stick {right}, "
+                f"triggers {triggers}, D-pad {dpad}, game mode {' + '.join(sorted(self.chord))}")
+
+
+def is_gamepad(keys: set[int], axes: set[int]) -> bool:
+    """The kernel's test (Documentation/input/gamepad.rst): every gamepad reports BTN_SOUTH. With the
+    left stick as well, a virtual keyboard that lists every key (ydotool's) and a pad's motion sensors
+    (axes, no buttons) are left out."""
+    return BTN_SOUTH in keys and ABS_X in axes and ABS_Y in axes
+
+
+def profile_for(name: str, vendor: int, product: int, driver: str, keys: set[int],
+                absinfo: dict[int, tuple[int, int]], family: str = "") -> Profile:
+    """Read a pad from what it reports: its key codes, its axes with their (min, max), its driver and
+    USB ids. `family` ([device] family) overrides the one its driver and maker give."""
+    family = family or FAMILY_DRIVERS.get(driver) or FAMILY_VENDORS.get(vendor, "generic")
+    buttons = {code: control for code, control in BUTTONS.items() if code in keys}
+    buttons.update({code: control for code, control in FAMILY_BUTTONS.get(family, {}).items() if code in keys})
+    hat = ABS_HAT0X in absinfo and ABS_HAT0Y in absinfo
+    if not hat:  # some pads send both: the hat then, so one press is one arrow
+        buttons.update({code: control for code, control in DPAD_BUTTONS.items() if code in keys})
+    axes: dict[int, Axis] = {}
+
+    def take(code: int, role: str) -> None:
+        low, high = absinfo[code]
+        axes[code] = Axis(role, low, high)
+
+    for code, role in ((ABS_X, "lx"), (ABS_Y, "ly")):
+        if code in absinfo:
+            take(code, role)
+    # The right stick: ABS_RX / ABS_RY as the spec says, or ABS_Z / ABS_RZ (an Xbox pad over
+    # Bluetooth, many plain HID pads).
+    for x, y in ((ABS_RX, ABS_RY), (ABS_Z, ABS_RZ)):
+        if x in absinfo and y in absinfo:
+            take(x, "rx")
+            take(y, "ry")
+            break
+    if hat:
+        take(ABS_HAT0X, "hatx")
+        take(ABS_HAT0Y, "haty")
+    # A trigger with a button (DualSense, Pro Controller) is that button; else its axis: xpad's ABS_Z /
+    # ABS_RZ, a Bluetooth Xbox pad's ABS_BRAKE / ABS_GAS, the spec's ABS_HAT2Y / ABS_HAT2X.
+    for control, button, candidates in (("l2", BTN_TL2, (ABS_Z, ABS_BRAKE, ABS_HAT2Y)),
+                                        ("r2", BTN_TR2, (ABS_RZ, ABS_GAS, ABS_HAT2X))):
+        if button in keys:
+            continue
+        for code in candidates:
+            if code in absinfo and code not in axes:
+                take(code, control)
+                break
+    controls = set(buttons.values())
+    chord = GAME_CHORD if GAME_CHORD <= controls else frozenset({"select", "start"})
+    return Profile(name, family, vendor, product, buttons, axes, chord)
+
+
+def driver_of(path: str, sysfs: str = "/sys") -> str:
+    """The kernel driver behind an event node (playstation, xpad, nintendo, hid-generic); "" for a
+    virtual device, which has none."""
+    link = Path(sysfs, "class", "input", os.path.basename(path), "device", "device", "driver")
+    return Path(os.path.realpath(link)).name if link.is_symlink() else ""
+
+
+def event_number(path: str) -> int:
+    digits = re.search(r"(\d+)$", path)
+    return int(digits.group(1)) if digits else 1 << 30
+
+
+def pick_pad(devices: list[tuple[str, str, bool]], wanted: str) -> str | None:
+    """From (path, name, is a gamepad): with no name wanted, the first gamepad by event number; with a
+    name, the first gamepad whose name holds it, else the first device whose name does (a pad the
+    kernel does not call a gamepad, named on purpose)."""
+    devices = sorted(devices, key=lambda device: event_number(device[0]))
+    if not wanted:
+        return next((path for path, _, gamepad in devices if gamepad), None)
+    named = [(path, gamepad) for path, name, gamepad in devices if wanted in name]
+    return next((path for path, gamepad in named if gamepad), named[0][0] if named else None)
 
 
 # --- Hyprland ------------------------------------------------------------------------------------
@@ -1709,8 +1866,10 @@ class Pad:
 
     def __init__(self, hypr: Hypr, fx: Fx, clock: Callable[[], float] = time.monotonic,
                  windows: Windows | None = None, runner: Runner | None = None, voice: Path | None = None,
-                 wheel: Wheel | None = None, mode: str = "desk", lights: Lights | None = None):
+                 wheel: Wheel | None = None, mode: str = "desk", lights: Lights | None = None,
+                 profile: Profile | None = None):
         self.hypr, self.fx, self.clock = hypr, fx, clock
+        self.profile = profile or Profile()
         self.windows = windows or Windows(hypr)
         self.runner = runner or Runner()
         self.talk = make_talk(self.runner, fx, clock, voice)
@@ -1728,20 +1887,21 @@ class Pad:
         self.held: dict[str, Press] = {}
         self.hat = {ABS_HAT0X: 0, ABS_HAT0Y: 0}
         self.stick = {"left": [0.0, 0.0], "right": [0.0, 0.0]}
+        self.pulled = {"l2": False, "r2": False}  # a trigger read from its axis: past TRIGGER_ON
         self.flicked: str | None = None
         self.rflicked: str | None = None   # the right stick's flick, in the world layer
         self.noted: set[str] = set()       # notes said once: what is not set up
 
     def feed(self, etype: int, code: int, value: int) -> None:
         if etype == EV_KEY:
-            name = BUTTONS.get(code)
+            name = self.profile.buttons.get(code)
             if name is None or value == 2:  # 2 is the kernel's autorepeat; repeats are ours
                 return
             if value:
                 self.buttons.add(name)
             else:
                 self.buttons.discard(name)
-            if value and name in GAME_CHORD and GAME_CHORD <= self.buttons:
+            if value and name in self.profile.chord and self.profile.chord <= self.buttons:
                 self.toggle_mode()
                 return
             if self.mode == "game":
@@ -1751,14 +1911,19 @@ class Pad:
             else:
                 self.release(name)
         elif etype == EV_ABS:
+            axis = self.profile.axes.get(code)
+            if axis is None:
+                return
             if self.mode == "game":
                 self.seed(code, value)  # where the sticks are, for the way back; nothing acts
                 return
-            if code in self.hat:
-                self.on_hat(code, value)
-            elif code in STICKS:
-                side, axis = STICKS[code]
-                self.stick[side][axis] = max(-1.0, min(1.0, (value - 128) / 127))
+            if axis.role in ("hatx", "haty"):
+                self.on_hat(ABS_HAT0X if axis.role == "hatx" else ABS_HAT0Y, (value > 0) - (value < 0))
+            elif axis.role in ("l2", "r2"):
+                self.on_trigger(axis.role, axis.travel(value))
+            else:
+                side, index = STICK_ROLES[axis.role]
+                self.stick[side][index] = axis.tilt(value)
                 if side == "left":
                     self.on_flick(flick(*self.stick["left"], self.flicked))
                 elif self.sessions.token is not None:
@@ -1772,7 +1937,7 @@ class Pad:
     def resync(self, down: set[int], axes: dict[int, int]) -> None:
         """Set the Pad from the pad's real state after the kernel dropped events: a button let go in
         the drop is released, one still down is pressed, the axes take their places."""
-        for code, name in BUTTONS.items():
+        for code, name in self.profile.buttons.items():
             if (code in down) != (name in self.buttons):
                 self.feed(EV_KEY, code, 1 if code in down else 0)
         for code, value in axes.items():
@@ -1789,11 +1954,26 @@ class Pad:
 
     def seed(self, code: int, value: int) -> None:
         """Where an axis already is when the pad appears: remembered, never pressed."""
-        if code in self.hat:
-            self.hat[code] = value
-        elif code in STICKS:
-            side, axis = STICKS[code]
-            self.stick[side][axis] = max(-1.0, min(1.0, (value - 128) / 127))
+        axis = self.profile.axes.get(code)
+        if axis is None:
+            return
+        if axis.role in ("hatx", "haty"):
+            self.hat[ABS_HAT0X if axis.role == "hatx" else ABS_HAT0Y] = (value > 0) - (value < 0)
+        elif axis.role in ("l2", "r2"):
+            self.pulled[axis.role] = axis.travel(value) >= TRIGGER_ON
+        else:
+            side, index = STICK_ROLES[axis.role]
+            self.stick[side][index] = axis.tilt(value)
+
+    def on_trigger(self, control: str, travel: float) -> None:
+        """A trigger with no button, read from its axis: a press past TRIGGER_ON, a let-go under
+        TRIGGER_OFF."""
+        if not self.pulled[control] and travel >= TRIGGER_ON:
+            self.pulled[control] = True
+            self.press(control)
+        elif self.pulled[control] and travel <= TRIGGER_OFF:
+            self.pulled[control] = False
+            self.release(control)
 
     def on_hat(self, code: int, value: int) -> None:
         low, high = ("left", "right") if code == ABS_HAT0X else ("up", "down")
@@ -1957,6 +2137,7 @@ class Pad:
         self.world = False
         self.hat = {ABS_HAT0X: 0, ABS_HAT0Y: 0}
         self.stick = {"left": [0.0, 0.0], "right": [0.0, 0.0]}
+        self.pulled = {"l2": False, "r2": False}
         self.flicked = None
         self.rflicked = None
 
@@ -2166,17 +2347,36 @@ class MicReader:
 
 
 def find_pad(path: str | None = None) -> Any:
+    """The pad, opened: the device at `path` or, with none, the first gamepad by event number; or the
+    one [device] name names (pick_pad). Every device looked at is closed again."""
     import evdev
 
+    seen = []
     for candidate in [path] if path else evdev.list_devices():
         try:
             dev = evdev.InputDevice(candidate)
         except OSError:
             continue
-        if dev.name in PAD_NAMES:
-            return dev
-        dev.close()
-    return None
+        try:
+            caps = dev.capabilities(absinfo=False)
+            seen.append((candidate, dev.name, is_gamepad(set(caps.get(EV_KEY, [])), set(caps.get(EV_ABS, [])))))
+        finally:
+            dev.close()
+    chosen = pick_pad(seen, CONFIG.device.name)
+    if chosen is None:
+        return None
+    try:
+        return evdev.InputDevice(chosen)
+    except OSError:
+        return None
+
+
+def profile_of(dev: Any) -> Profile:
+    """The opened pad, read: profile_for with what the kernel reports for it."""
+    caps = dev.capabilities()
+    absinfo = {code: (info.min, info.max) for code, info in caps.get(EV_ABS, [])}
+    return profile_for(dev.name, dev.info.vendor, dev.info.product, driver_of(dev.path),
+                       set(caps.get(EV_KEY, [])), absinfo, CONFIG.device.family)
 
 
 # A DualSense (0CE6) and a DualSense Edge (0DF2): the pads with the mic button, in the reports
@@ -2210,7 +2410,7 @@ def input_dir(dev: Any) -> str:
 
 
 def serve(dev: Any, pad: Pad, motors: Motors, mic: MicReader | None = None) -> None:
-    for code in AXES:
+    for code in pad.profile.axes:
         info = dev.absinfo(code)
         if info is not None:
             pad.seed(code, int(info.value))
@@ -2258,7 +2458,7 @@ class EventReader:
     def resync(self) -> None:
         log.info("events dropped: the pad's state read again")
         axes = {}
-        for code in AXES:
+        for code in self.pad.profile.axes:
             info = self.dev.absinfo(code)
             if info is not None:
                 axes[code] = int(info.value)
@@ -2309,16 +2509,20 @@ def run_daemon(dry: bool, device: str | None) -> None:
         dev = find_pad(device)
         if dev is None:
             if not waiting:
-                log.info("waiting for the pad")
+                log.info("waiting for the pad%s", f" at {device} (a gamepad, or what [device] name names)"
+                         if device else "")
             waiting = True
             time.sleep(1.0)
             continue
         waiting = False
+        profile = profile_of(dev)
+        log.info("%s", profile.describe())
         motors = Motors(dev, dry=dry)
         where = input_dir(dev)
         lights: Lights = DryLights() if dry else SysfsLights(where)
         mic = MicReader(where) if has_mic(dev.info.vendor, dev.info.product) else None
-        pad = Pad(hypr, motors, runner=DryRunner() if dry else None, wheel=wheel, mode=mode, lights=lights)
+        pad = Pad(hypr, motors, runner=DryRunner() if dry else None, wheel=wheel, mode=mode, lights=lights,
+                  profile=profile)
         way_in = ("Game mode: the pad is the game's. PS + Options brings it back." if mode == "game"
                   else "Hold L2 for the desktop.")
         motors.notify("DualSense ready", f"Battery {battery(where)}. {way_in}")
@@ -2460,6 +2664,7 @@ def print_status() -> None:
         else:
             where = input_dir(dev)
             print(f"pad: {dev.name} at {dev.path}, battery {battery(where)}")
+            print(f"read as: {profile_of(dev).describe()}")
             rgb = SysfsLights(where).rgb / "multi_intensity"
             if not rgb.exists():
                 print("lights: none on this pad")
@@ -2487,7 +2692,7 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="cmd", required=True)
     run = sub.add_parser("run", help="the daemon")
     run.add_argument("--dry", action="store_true", help="print actions instead of sending them")
-    run.add_argument("--device", help="this event node instead of the first DualSense found")
+    run.add_argument("--device", help="this event node instead of the first gamepad found")
     status = sub.add_parser("status", help="the pad, its battery, Hyprland, the config")
     check_it = sub.add_parser("check", help="read the config, and build every action in the running Hyprland "
                                             "without running it")
