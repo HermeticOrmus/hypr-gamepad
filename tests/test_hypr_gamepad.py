@@ -1499,7 +1499,8 @@ class SysfsLightsFiles(unittest.TestCase):
         self.assertEqual((lights.rgb / "multi_intensity").read_text(), "255 150 18")
         self.assertEqual((lights.rgb / "brightness").read_text(), "255")
         self.assertEqual([(p / "brightness").read_text() for p in lights.player], ["0", "1", "0", "1", "0"])
-        lights.rgb = root / "missing"
+        lights.rgb = root / "refused"  # there, but not writable: the udev rule is not installed
+        lights.rgb.mkdir(mode=0o500)
         with self.assertLogs("hypr-gamepad", "INFO") as logs:
             lights.color((1, 2, 3))
             lights.color((4, 5, 6))
@@ -1815,6 +1816,9 @@ class WakeNote(unittest.TestCase):
 
         class Dev:
             uniq, path, name = "aa:bb:cc:dd:ee:ff", "/dev/input/event258", "DualSense Wireless Controller"
+
+            class info:
+                vendor, product = 0x054C, 0x0CE6
 
             def close(self):
                 pass
