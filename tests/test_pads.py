@@ -277,6 +277,47 @@ class Sysfs(unittest.TestCase):
             self.assertEqual(hg.find_pad(sysfs=str(self.root)), "/dev/input/event258")
 
 
+class NamedDevices(unittest.TestCase):
+    """A device named on purpose (--device, [device] name) may be a pad the kernel does not call a
+    gamepad: joystick buttons and a stick. Never a keyboard, a mouse or a touchpad: an event number can
+    change after a reboot, and a grabbed keyboard leaves the desk without one."""
+
+    def setUp(self):
+        self.root = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, self.root)
+        sysfs_device(self.root, "event5", "DragonRise Inc. Generic USB Joystick", 0x0079, 0x0006,
+                     "fff00000000 0 0 0 0", "30027")                    # BTN_TRIGGER .. BTN_BASE6; X Y Z RZ hat
+        sysfs_device(self.root, "event6", "Some Keyboard", 0x1234, 0x0001, "ffffffffffffffff fffffffffffffffe", "0")
+        sysfs_device(self.root, "event7", "ELAN Touchpad", 0x04F3, 0x32EE, "6420 30000 0 0 0 0", "3")
+        sysfs_device(self.root, "event8", "Logitech USB Receiver", 0x046D, 0xC548, "1f0000 0 0 0 0", "3")
+
+    def find(self, path=None, name=""):
+        class Evdev:
+            @staticmethod
+            def InputDevice(found):
+                return found
+
+        from unittest import mock
+        saved = hg.CONFIG
+        self.addCleanup(setattr, hg, "CONFIG", saved)
+        hg.CONFIG = hg.Config(device=hg.DeviceConfig(name=name))
+        with mock.patch.dict(sys.modules, {"evdev": Evdev}):
+            return hg.find_pad(path, sysfs=str(self.root))
+
+    def test_a_joystick_is_not_found_by_itself(self):
+        self.assertIsNone(self.find())
+
+    def test_a_joystick_named_by_node_or_name_is_the_pad(self):
+        self.assertEqual(self.find("/dev/input/event5"), "/dev/input/event5")
+        self.assertEqual(self.find(name="Generic USB Joystick"), "/dev/input/event5")
+
+    def test_a_keyboard_a_touchpad_or_a_mouse_never_is(self):
+        for event in ("event6", "event7", "event8"):
+            self.assertIsNone(self.find(f"/dev/input/{event}"), event)
+        self.assertIsNone(self.find(name="Keyboard"))
+        self.assertIsNone(self.find(name="Touchpad"))
+
+
 class Profiles(unittest.TestCase):
     def test_a_real_dualsense_reads_as_it_always_did(self):
         """The default Profile is what the tests and the old pad assume; a DualSense as the kernel
