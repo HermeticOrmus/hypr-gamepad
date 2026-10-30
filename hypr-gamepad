@@ -2207,8 +2207,8 @@ class Pad:
             self.scroll.pause()
             self.rflicked = flick(*self.stick["right"], None)
             return
-        if control == "east" and (self.talk.drop() or self.sessions.cancel()):
-            return  # Circle (east) while talking drops the recording, with the wheel open closes it; not Esc
+        if control in self.droppers() and (self.talk.drop() or self.sessions.cancel()):
+            return  # Esc's button while talking drops the recording, with the wheel open closes it; not Esc
         layer = "world" if self.world else "base"
         name = layout(layer).get(control)
         if name is None:
@@ -2220,6 +2220,12 @@ class Pad:
         self.held[control] = press
         if not action.tap:
             self.run(press)
+
+    @staticmethod
+    def droppers() -> set[str]:
+        """The buttons that drop a talk or close the wheel, in either layer: the base layer's Esc
+        (Circle, east, by default; south after a Nintendo-style swap)."""
+        return {control for control, action in layout("base").items() if action == "escape"} or {"east"}
 
     def release(self, control: str) -> None:
         if control == LAYER_KEY:

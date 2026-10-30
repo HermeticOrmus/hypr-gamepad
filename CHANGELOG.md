@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- The button that is Esc drops a talk and closes the wheel (Circle by default), so a layout that moves Esc moves that too.
 - Docs: the README covers any controller, `learn` and the names per family; `docs/herdr.md` has herdr's prefix-free keys and agents and workspaces on the left stick; `setups/README.md` says how to share a setup.
 - `install.sh`: one command for your user (no sudo); `--enable` starts it, `--uninstall` takes it out. The udev rule also opens `/dev/uinput` to group `input`, for the scroll wheel on any desk.
 - `check` says in one line when Hyprland takes no Lua (a `hyprland.conf` setup, or a Hyprland older than 0.56) or does not answer, instead of a FAIL for every action.
