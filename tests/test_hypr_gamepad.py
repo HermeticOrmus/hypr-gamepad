@@ -397,7 +397,7 @@ class HyprSocket(unittest.TestCase):
         extra = ["eval local _ = " + sp.POINTER_TO.format(x=0, y=0),   # the scroll's pointer move
                  'eval local _ = hl.dsp.event("ormus.sessions-wheel cancel")',
                  'eval local _ = hl.dsp.event("ormus.hypr-gamepad-map hide")']
-        self.assertEqual(stub.asked, extra + [f"eval {p}" for p in probes])
+        self.assertEqual(stub.asked, ["eval local _ = 1"] + extra + [f"eval {p}" for p in probes])
         for asked in stub.asked:  # builds a dispatcher, never hands one to hl.dispatch
             self.assertTrue(asked.startswith("eval local") or "error(" in asked, asked)
             self.assertNotIn("hl.dispatch(", asked)
