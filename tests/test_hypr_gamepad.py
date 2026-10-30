@@ -1628,12 +1628,14 @@ class OnlyWhatThePadHas(unittest.TestCase):
 
 class UdevRule(unittest.TestCase):
     def test_the_rule_reaches_only_the_dualsense_and_reads_its_raw_node(self):
-        rules = [l for l in RULE.read_text().splitlines() if l and not l.startswith("#")]
+        everything = [l for l in RULE.read_text().splitlines() if l and not l.startswith("#")]
+        for rule in everything:
+            self.assertNotIn("0666", rule)
+            self.assertNotIn("uaccess", rule)   # uaccess would give read AND write
+        rules = [r for r in everything if 'KERNEL=="uinput"' not in r]
         self.assertEqual(len(rules), 3)
         for rule in rules:
             self.assertIn('KERNELS=="*:054C:0CE6.*|*:054C:0DF2.*"', rule)
-            self.assertNotIn("0666", rule)
-            self.assertNotIn("uaccess", rule)   # uaccess would give read AND write
         leds = [r for r in rules if 'SUBSYSTEM=="leds"' in r]
         self.assertEqual(len(leds), 2)
         for rule in leds:
@@ -1641,6 +1643,13 @@ class UdevRule(unittest.TestCase):
             self.assertIn("chmod g+w", rule)
         self.assertIn('SUBSYSTEM=="hidraw"', rules[2])
         self.assertIn('GROUP="input", MODE="0640"', rules[2])   # read only
+
+    def test_group_input_may_make_the_virtual_wheel(self):
+        """Smooth scrolling is a virtual wheel made through /dev/uinput, which only some packages open to
+        group input (ydotool's 80-uinput.rules on a test machine): the rule says it for any pad."""
+        rules = [l for l in RULE.read_text().splitlines() if 'KERNEL=="uinput"' in l and not l.startswith("#")]
+        self.assertEqual(rules, ['KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", '
+                                 'OPTIONS+="static_node=uinput"'])
 
     def test_it_sorts_before_the_seat_rules_that_turn_uaccess_into_acls(self):
         self.assertLess(RULE.name, "71-seat.rules")        # tags the device for the seat
