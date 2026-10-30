@@ -428,6 +428,48 @@ class HyprSocket(unittest.TestCase):
         self.assertEqual(stub.asked, [])
 
 
+class CheckHyprland(unittest.TestCase):
+    """hypr-gamepad speaks Lua to Hyprland. A Hyprland that cannot (a hyprland.conf setup, or one older
+    than 0.56) gets one line that says so, not a FAIL for every action. The answers are Hyprland
+    0.56.2's (src/debug/HyprCtl.cpp: evalRequest, and its "unknown request")."""
+
+    def setUp(self):
+        self.runtime = Path(tempfile.mkdtemp(dir="/tmp"))
+        self.addCleanup(shutil.rmtree, self.runtime)
+
+    def check(self, answers: dict | None) -> tuple[int, str]:
+        from contextlib import redirect_stdout
+        import io
+        if answers is not None:
+            stub = StubHyprland(self.runtime, "sig1", answers)
+            self.addCleanup(stub.close)
+        out = io.StringIO()
+        with redirect_stdout(out), self.assertNoLogs("hypr-gamepad", "WARNING"):
+            code = sp.check(sp.Hypr(runtime=str(self.runtime), signature=""))
+        return code, out.getvalue()
+
+    def test_a_hyprland_conf_setup_is_one_line(self):
+        code, out = self.check({"eval": "eval is only supported with the lua config manager"})
+        self.assertEqual(code, 1)
+        self.assertEqual(out.splitlines(), [
+            "FAIL hyprland: it reads a hyprland.conf; hypr-gamepad needs a Lua config (hyprland.lua, Hyprland 0.56+)"])
+
+    def test_an_older_hyprland_is_one_line(self):
+        code, out = self.check({"eval": "unknown request"})
+        self.assertEqual(code, 1)
+        self.assertEqual(out.splitlines(), ["FAIL hyprland: too old; hypr-gamepad needs Hyprland 0.56+ with a Lua config"])
+
+    def test_no_hyprland_is_one_line(self):
+        code, out = self.check(None)
+        self.assertEqual(code, 1)
+        self.assertEqual(out.splitlines(), ["FAIL hyprland: does not answer (is it running in this session?)"])
+
+    def test_a_lua_hyprland_says_so_and_goes_on(self):
+        code, out = self.check({"eval": "ok"})
+        self.assertEqual(code, 0)
+        self.assertEqual(out.splitlines()[0], "ok   hyprland: Lua config")
+
+
 class Unit(unittest.TestCase):
     def test_the_unit_runs_the_daemon_in_the_graphical_session(self):
         text = UNIT.read_text()
