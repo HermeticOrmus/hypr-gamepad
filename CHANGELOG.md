@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `hypr-gamepad learn` asks for each control in turn and prints the `[buttons]` and `[axes]` lines the pad needs, or says it needs none. `--device` and `[device] name` may name a joystick-style pad the kernel does not call a gamepad; never a keyboard, a mouse or a touchpad.
 - `[buttons]` and `[axes]` name a pad's own codes when it does not follow the kernel's gamepad spec (a plain USB pad with joystick buttons, a stick on other axes, an axis that runs the other way).
 - The map and the notes name each control as the pad in the hand does: A B X Y, LB RB LT RT, View Menu Xbox on an Xbox pad; B A Y X, L R ZL ZR, Minus Plus Home on a Nintendo pad; South East West North on a plain pad. `map --pad FAMILY` shows a family's names.
 - The pad is found from sysfs and is the one device opened: 7 ms instead of about 700 ms on a desk with 43 input devices, each second while the pad sleeps.

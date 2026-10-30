@@ -10,7 +10,8 @@
 # and a left stick), so a DualSense, an Xbox pad, a Switch Pro Controller or a plain USB pad.
 # `hypr-gamepad status` says which pad it found and how it reads it.
 # [device]
-# name = ""                       # the pad whose name holds this text, as `hypr-gamepad status` shows it
+# name = ""                       # the pad whose name holds this text, as `hypr-gamepad status` shows it;
+#                                 # may name a joystick-style pad the kernel does not call a gamepad
 # family = ""                     # playstation | xbox | nintendo | generic; "" = from its driver and maker
 
 # A pad that sends other codes than the kernel's gamepad spec says (south for the bottom face

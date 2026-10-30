@@ -11,7 +11,9 @@ pad, B A Y X and L R ZL ZR on a Nintendo one), and `map --pad FAMILY` shows any 
     hypr-gamepad status                        the pad, its battery, Hyprland, the config file
     hypr-gamepad check                         the config, then every action builds in the running
                                                Hyprland (runs none)
-    hypr-gamepad map [--json]                  what each control does, from LAYOUT and the config
+    hypr-gamepad map [--json] [--pad FAMILY]   what each control does, from LAYOUT and the config
+    hypr-gamepad learn [--device PATH]         press each control in turn: prints the [buttons] and
+                                               [axes] lines a pad needs, when it needs any
 
 Each takes --config PATH. Without it the config is $XDG_CONFIG_HOME/hypr-gamepad/config.toml
 (~/.config/hypr-gamepad/config.toml), and no file there means the defaults described here:
@@ -575,6 +577,17 @@ def is_gamepad(keys: set[int], axes: set[int]) -> bool:
     return BTN_SOUTH in keys and ABS_X in axes and ABS_Y in axes
 
 
+# A joystick: buttons in the joystick and gamepad ranges (BTN_TRIGGER .. BTN_THUMBR, BTN_TRIGGER_HAPPY*)
+# and a stick, and none of what a touchpad or a tablet reports. What --device or [device] name may name
+# besides a gamepad; a keyboard, a mouse or a touchpad never.
+JOYSTICK_KEYS = frozenset(range(0x120, 0x140)) | frozenset(range(0x2C0, 0x2E8))
+POINTER_KEYS = frozenset({0x140, 0x145, 0x14A})  # BTN_TOOL_PEN, BTN_TOOL_FINGER, BTN_TOUCH
+
+
+def is_joystick(keys: set[int], axes: set[int]) -> bool:
+    return ABS_X in axes and ABS_Y in axes and bool(keys & JOYSTICK_KEYS) and not keys & POINTER_KEYS
+
+
 def profile_for(name: str, vendor: int, product: int, driver: str, keys: set[int],
                 absinfo: dict[int, tuple[int, int]], family: str = "",
                 button_map: dict[str, int] | None = None,
@@ -665,6 +678,10 @@ class Device:
     @property
     def gamepad(self) -> bool:
         return is_gamepad(set(self.keys), set(self.axes))
+
+    @property
+    def joystick(self) -> bool:
+        return is_joystick(set(self.keys), set(self.axes))
 
 
 LONG_BITS = struct.calcsize("l") * 8  # sysfs prints a capability bitmap in the kernel's longs
@@ -2525,12 +2542,14 @@ class MicReader:
 
 def find_pad(path: str | None = None, sysfs: str = "/sys") -> Any:
     """The pad, opened: the device at `path` or, with none, the first gamepad by event number; or the
-    one [device] name names (pick_pad). Read from sysfs, so the pad is the one device opened; a pad
-    that will not open (no access) gives way to the next."""
+    one [device] name names (pick_pad). A device named on purpose may be a joystick (is_joystick), never
+    a keyboard, a mouse or a touchpad. Read from sysfs, so the pad is the one device opened; a pad that
+    will not open (no access) gives way to the next."""
     import evdev
 
     only = os.path.basename(os.path.realpath(path)) if path else None
-    seen = [(device.path, device.name, device.gamepad) for device in scan(sysfs, only)]
+    seen = [(device.path, device.name, device.gamepad or bool(only)) for device in scan(sysfs, only)
+            if device.gamepad or device.joystick]
     while (chosen := pick_pad(seen, CONFIG.device.name)) is not None:
         try:
             return evdev.InputDevice(chosen)
@@ -2766,7 +2785,7 @@ def map_pad(family: str | None, sysfs: str = "/sys") -> tuple[Profile, str]:
     family names its controls; `family` names them as that family does instead. With no pad and no
     family, the plain names (south, L1, select). Read from sysfs: nothing is opened."""
     found, charge = None, ""
-    seen = scan(sysfs)
+    seen = [device for device in scan(sysfs) if device.gamepad or device.joystick]
     chosen = pick_pad([(device.path, device.name, device.gamepad) for device in seen], CONFIG.device.name)
     for device in seen:
         if device.path == chosen:
@@ -2791,6 +2810,177 @@ def print_map(as_json: bool, profile: Profile | None = None, charge: str = "") -
         print(names[layer])
         for row in rows:
             print(f"  {row['glyph'] or ' '} {row['name']:<12} {row['label']}")
+
+
+# --- learn: which code is which control, asked of the person holding the pad ---------------------
+
+LEARN_STEPS = [
+    ("south", "button", "Press the bottom face button (Cross; A on Xbox, B on Nintendo)"),
+    ("east", "button", "Press the right face button (Circle; B on Xbox, A on Nintendo)"),
+    ("west", "button", "Press the left face button (Square; X on Xbox, Y on Nintendo)"),
+    ("north", "button", "Press the top face button (Triangle; Y on Xbox, X on Nintendo)"),
+    ("l1", "button", "Press the left shoulder button (L1, LB, L)"),
+    ("r1", "button", "Press the right shoulder button (R1, RB, R)"),
+    ("l2", "trigger", "Pull the left trigger all the way (L2, LT, ZL)"),
+    ("r2", "trigger", "Pull the right trigger all the way (R2, RT, ZR)"),
+    ("l3", "button", "Press the left stick in"),
+    ("r3", "button", "Press the right stick in"),
+    ("select", "button", "Press the left middle button (Create, View, Minus)"),
+    ("start", "button", "Press the right middle button (Options, Menu, Plus)"),
+    ("home", "button", "Press the home button (PS, Xbox, Home)"),
+    ("up", "dpad", "Press the D-pad up"),
+    ("down", "dpad", "Press the D-pad down"),
+    ("left", "dpad", "Press the D-pad left"),
+    ("right", "dpad", "Press the D-pad right"),
+    ("left_x", "stick", "Push the left stick right, all the way"),
+    ("left_y", "stick", "Push the left stick down, all the way"),
+    ("right_x", "stick", "Push the right stick right, all the way"),
+    ("right_y", "stick", "Push the right stick down, all the way"),
+]
+
+
+class Catch:
+    """One step of learn: the control the person works, from the pad's events. A button is its first
+    press. A trigger is its button, or an axis pulled TRIGGER of its range from rest (a stick moves half
+    its range at most, so a stick is never taken for a trigger). A stick direction is the axis that
+    moves STICK of its range; one that moves the other way is flipped. A D-pad direction is the hat
+    (ABS_HAT0X / ABS_HAT0Y) or a button."""
+
+    STICK, TRIGGER = 1 / 3, 0.6
+
+    def __init__(self, kind: str, absinfo: dict[int, tuple[int, int]], rest: dict[int, int]):
+        self.kind, self.absinfo, self.rest = kind, absinfo, rest
+
+    def feed(self, etype: int, code: int, value: int) -> tuple | None:
+        if etype == EV_KEY:
+            return ("key", code) if value == 1 and self.kind != "stick" else None
+        if etype != EV_ABS or code not in self.absinfo:
+            return None
+        if code in (ABS_HAT0X, ABS_HAT0Y):
+            return ("hat",) if self.kind == "dpad" and value else None
+        if self.kind not in ("trigger", "stick"):
+            return None
+        low, high = self.absinfo[code]
+        if high <= low:
+            return None
+        moved = (value - self.rest.get(code, (low + high + 1) // 2)) / (high - low)
+        if abs(moved) >= (self.TRIGGER if self.kind == "trigger" else self.STICK):
+            return ("axis", code, moved < 0)
+        return None
+
+
+def settled(down: set[int], values: dict[int, int], rest: dict[int, int],
+            absinfo: dict[int, tuple[int, int]]) -> bool:
+    """Every button let go and every axis back near where it rests: the next step may start."""
+    if down:
+        return False
+    for code, value in values.items():
+        if code in absinfo and code in rest:
+            low, high = absinfo[code]
+            if abs(value - rest[code]) > 0.2 * max(1, high - low):
+                return False
+    return True
+
+
+def learn_lines(auto: Profile, learned: dict[str, tuple | None]) -> list[str]:
+    """The [buttons] and [axes] lines that make hypr-gamepad read the pad as `learned` says, where its
+    own reading (`auto`, the profile with no tables) differs; [] when it needs none."""
+    buttons, axes = [], []
+    for target, _, _ in LEARN_STEPS:
+        found = learned.get(target)
+        if found is None or found[0] == "hat":
+            continue
+        if found[0] == "key":
+            code = found[1]
+            if auto.buttons.get(code) != target or any(axis.role == target for axis in auto.axes.values()):
+                buttons.append(f'{target} = "{BUTTON_NAMES.get(code, hex(code))}"')
+            continue
+        _, code, flip = found
+        have = auto.axes.get(code)
+        if have is None or have.role != REMAP_AXES[target] or have.flip != flip:
+            axes.append(f'{target} = "{"-" if flip else ""}{AXIS_NAMES.get(code, hex(code))}"')
+    lines = ["[buttons]", *buttons] if buttons else []
+    if axes:
+        lines += ([""] if lines else []) + ["[axes]", *axes]
+    return lines
+
+
+def learn(device: str | None, wait: float) -> int:
+    """Ask for each control in LEARN_STEPS, read which code the pad sends, print the lines it needs."""
+    try:
+        dev = find_pad(device)
+    except ImportError:
+        print("learn needs python-evdev (python-evdev or python3-evdev in your distribution)")
+        return 1
+    if dev is None:
+        print("No gamepad found. A pad the kernel does not call a gamepad: name it in [device] name, or "
+              "give its event node with --device.")
+        return 1
+    caps = dev.capabilities()
+    absinfo = {code: (info.min, info.max) for code, info in caps.get(EV_ABS, [])}
+    rest = {code: info.value for code, info in caps.get(EV_ABS, [])}
+    auto = profile_for(dev.name, dev.info.vendor, dev.info.product, driver_of(dev.path), set(caps.get(EV_KEY, [])),
+                       absinfo, CONFIG.device.family)
+    try:
+        dev.grab()
+    except OSError:
+        print(f"Another program holds {dev.name} (the hypr-gamepad service?). Give the pad to a game with "
+              f"{auto.chord_name()}, or stop the service (systemctl --user stop hypr-gamepad), then run learn "
+              "again.")
+        dev.close()
+        return 1
+    os.set_blocking(dev.fd, False)
+    print(f"{dev.name}, read as {auto.family}. Each control in turn; wait {wait:g} s to skip one the pad "
+          "lacks.", flush=True)
+    learned: dict[str, tuple | None] = {}
+    down: set[int] = set()
+    values = dict(rest)
+
+    def events(until: float) -> Any:
+        while time.monotonic() < until:
+            ready, _, _ = select.select([dev.fd], [], [], 0.05)
+            if not ready:
+                continue
+            try:
+                batch = list(dev.read())
+            except BlockingIOError:
+                continue
+            for event in batch:
+                if event.type == EV_KEY:
+                    (down.add if event.value else down.discard)(event.code)
+                elif event.type == EV_ABS:
+                    values[event.code] = event.value
+                yield event
+
+    try:
+        for target, kind, prompt in LEARN_STEPS:
+            print(f"{prompt} ...", flush=True)
+            catch = Catch(kind, absinfo, rest)
+            found = None
+            for event in events(time.monotonic() + wait):
+                found = catch.feed(event.type, event.code, event.value)
+                if found is not None:
+                    break
+            learned[target] = found
+            print(f"  {target}: " + ("skipped" if found is None else "the hat" if found[0] == "hat" else
+                                     BUTTON_NAMES.get(found[1], hex(found[1])) if found[0] == "key" else
+                                     ("-" if found[2] else "") + AXIS_NAMES.get(found[1], hex(found[1]))), flush=True)
+            for _ in events(time.monotonic() + 3.0):
+                if settled(down, values, rest, absinfo):
+                    break
+    finally:
+        try:
+            dev.ungrab()
+        except OSError:
+            pass
+        dev.close()
+    lines = learn_lines(auto, learned)
+    if not lines:
+        print("This pad needs no [buttons] or [axes]: hypr-gamepad reads it as it is.")
+        return 0
+    print(f"\n# {dev.name}: paste into {default_config_path()}")
+    print("\n".join(lines))
+    return 0
 
 
 def check(hypr: Hypr) -> int:
@@ -2878,9 +3068,13 @@ def main(argv: list[str] | None = None) -> int:
                                             "without running it")
     show = sub.add_parser("map", help="what each control does")
     show.add_argument("--json", action="store_true")
+    teach = sub.add_parser("learn", help="press each control in turn; prints the [buttons] and [axes] lines "
+                                         "a pad needs")
+    teach.add_argument("--device", help="this event node instead of the first gamepad found")
+    teach.add_argument("--wait", type=float, default=10.0, help="seconds to wait for each control (default 10)")
     show.add_argument("--pad", choices=FAMILIES, help="name the controls as this family's pads do "
                                                       "(default: as the pad connected does)")
-    for command in (run, status, check_it, show):
+    for command in (run, status, check_it, show, teach):
         command.add_argument("--config", metavar="PATH",
                              help=f"the config file (default {default_config_path()}; none there: the defaults)")
     args = parser.parse_args(argv)
@@ -2911,6 +3105,8 @@ def main(argv: list[str] | None = None) -> int:
         print(f"config: {source}{'' if source.exists() else ' (none: the defaults)'}")
     elif args.cmd == "check":
         return check(Hypr())
+    elif args.cmd == "learn":
+        return learn(args.device, args.wait)
     else:
         signal.signal(signal.SIGTERM, lambda *_: sys.exit(0))
         run_daemon(args.dry, args.device)
