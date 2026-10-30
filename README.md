@@ -133,6 +133,10 @@ Show yours: [open a "Share your setup" issue](https://github.com/HermeticOrmus/h
 ./check.sh        # Python unit tests and the map's Node tests; no real Hyprland or pad is touched
 ```
 
+## Troubleshooting
+
+[docs/troubleshooting.md](docs/troubleshooting.md): what `status`, `check` and the log say, and what to do about each.
+
 ## Feedback
 
 Tell us what worked and what got in your way: [open a feedback issue](https://github.com/HermeticOrmus/hypr-gamepad/issues/new?template=feedback.yml). Questions go to [Discussions](https://github.com/HermeticOrmus/hypr-gamepad/discussions).
