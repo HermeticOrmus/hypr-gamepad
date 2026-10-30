@@ -435,6 +435,24 @@ class CommandTalk(ConfigCase):
         self.assertEqual(self.sent(), [])
         self.assertFalse(self.pad.talk.active())
 
+    def test_the_button_that_is_esc_drops_it_after_a_swap(self):
+        """A Nintendo pad's swap (B, south, is Esc; A, east, is Enter): the Esc button drops a talk, and
+        the Enter button is Enter, in either layer."""
+        self.use(COMMAND_TALK + '\n[layout.base]\nsouth = "escape"\neast = "enter"\n')
+        self.hypr.active = HERDR
+        self.pad.press("r2")
+        self.clock.now += 1.0
+        self.tap("east")                                             # Enter: the talk goes on
+        self.assertEqual(self.sent(), [shortcut("", "Return", "0xa1")])
+        self.assertTrue(self.pad.talk.active())
+        self.pad.press("l2")
+        self.tap("south")                                            # Esc, on the desktop side too
+        self.pad.release("l2")
+        self.pad.release("r2")
+        self.assertEqual(self.runner.calls, [START, CANCEL])
+        self.assertEqual(self.sent(), [])
+        self.assertFalse(self.pad.talk.active())
+
     def test_the_mic_button_starts_and_the_next_press_ends(self):
         self.pad.button("mic", True)
         self.pad.button("mic", False)
