@@ -17,7 +17,7 @@ const M = vm.runInNewContext(`${read("Map.js").replace(/^\.pragma library\n/, ""
 test("where the map says the pad is", () => {
   assert.equal(M.kindPhrase("herdr"), "inside herdr");
   assert.equal(M.kindPhrase("browser"), "in the browser");
-  assert.equal(M.kindPhrase("board"), "on the Sun board");
+  assert.equal(M.kindPhrase("board"), "on the board");  // any board app, not one desk's
   assert.equal(M.kindPhrase("whatever"), "in this window");
 });
 
