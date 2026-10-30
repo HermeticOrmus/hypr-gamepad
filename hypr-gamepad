@@ -2942,38 +2942,38 @@ def learn(device: str | None, wait: float) -> int:
     down: set[int] = set()
     values = dict(rest)
 
-    def events(until: float) -> Any:
-        while time.monotonic() < until:
-            ready, _, _ = select.select([dev.fd], [], [], 0.05)
-            if not ready:
-                continue
-            try:
-                batch = list(dev.read())
-            except BlockingIOError:
-                continue
-            for event in batch:
-                if event.type == EV_KEY:
-                    (down.add if event.value else down.discard)(event.code)
-                elif event.type == EV_ABS:
-                    values[event.code] = event.value
-                yield event
+    def pump(timeout: float) -> list[Any]:
+        """The events that came within `timeout`, every one of them tracked (keys down, axis values)."""
+        ready, _, _ = select.select([dev.fd], [], [], timeout)
+        if not ready:
+            return []
+        try:
+            batch = list(dev.read())
+        except BlockingIOError:
+            return []
+        for event in batch:
+            if event.type == EV_KEY:
+                (down.add if event.value else down.discard)(event.code)
+            elif event.type == EV_ABS:
+                values[event.code] = event.value
+        return batch
 
     try:
         for target, kind, prompt in LEARN_STEPS:
             print(f"{prompt} ...", flush=True)
             catch = Catch(kind, absinfo, rest)
             found = None
-            for event in events(time.monotonic() + wait):
-                found = catch.feed(event.type, event.code, event.value)
-                if found is not None:
-                    break
+            end = time.monotonic() + wait
+            while found is None and time.monotonic() < end:
+                for event in pump(0.05):
+                    found = found or catch.feed(event.type, event.code, event.value)
             learned[target] = found
             print(f"  {target}: " + ("skipped" if found is None else "the hat" if found[0] == "hat" else
                                      BUTTON_NAMES.get(found[1], hex(found[1])) if found[0] == "key" else
                                      ("-" if found[2] else "") + AXIS_NAMES.get(found[1], hex(found[1]))), flush=True)
-            for _ in events(time.monotonic() + 3.0):
-                if settled(down, values, rest, absinfo):
-                    break
+            end = time.monotonic() + 3.0  # let go of it before the next step asks
+            while found is not None and not settled(down, values, rest, absinfo) and time.monotonic() < end:
+                pump(0.05)
     finally:
         try:
             dev.ungrab()
