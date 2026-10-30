@@ -625,6 +625,92 @@ class Remaps(PadCase):
         self.assertIn("axes.right_x", proc.stdout)
 
 
+class Learn(unittest.TestCase):
+    """`hypr-gamepad learn` asks for each control in turn and prints the [buttons] and [axes] lines this
+    pad needs: only the ones that differ from what hypr-gamepad makes of it by itself."""
+
+    def catch(self, kind: str, events, absinfo=None, rest=None):
+        absinfo = absinfo or {ABS_X: (0, 255), ABS_Y: (0, 255), ABS_Z: (0, 255), ABS_HAT0X: (-1, 1),
+                              ABS_HAT0Y: (-1, 1)}
+        rest = rest or {ABS_X: 128, ABS_Y: 128, ABS_Z: 0, ABS_HAT0X: 0, ABS_HAT0Y: 0}
+        catch = hg.Catch(kind, absinfo, rest)
+        for event in events:
+            found = catch.feed(*event)
+            if found is not None:
+                return found
+        return None
+
+    def test_a_button_is_its_first_press(self):
+        self.assertEqual(self.catch("button", [(EV_KEY, BTN_SOUTH, 0), (EV_ABS, ABS_X, 140), (EV_KEY, BTN_NORTH, 1)]),
+                         ("key", BTN_NORTH))
+        self.assertIsNone(self.catch("button", [(EV_ABS, ABS_X, 255), (EV_KEY, BTN_SOUTH, 0)]))
+
+    def test_a_trigger_is_its_button_or_an_axis_pulled_most_of_the_way(self):
+        self.assertEqual(self.catch("trigger", [(EV_ABS, ABS_Z, 40), (EV_KEY, BTN_TL2, 1)]), ("key", BTN_TL2))
+        self.assertEqual(self.catch("trigger", [(EV_ABS, ABS_Z, 100), (EV_ABS, ABS_Z, 160)]), ("axis", ABS_Z, False))
+        self.assertEqual(self.catch("trigger", [(EV_ABS, ABS_Z, 40)], rest={ABS_Z: 255}), ("axis", ABS_Z, True))
+        self.assertIsNone(self.catch("trigger", [(EV_ABS, ABS_X, 255)]))   # a stick moves half its range at most
+
+    def test_a_stick_is_the_axis_that_moves_and_its_way(self):
+        self.assertEqual(self.catch("stick", [(EV_ABS, ABS_Y, 140), (EV_ABS, ABS_X, 250)]), ("axis", ABS_X, False))
+        self.assertEqual(self.catch("stick", [(EV_ABS, ABS_Y, 5)]), ("axis", ABS_Y, True))
+        self.assertIsNone(self.catch("stick", [(EV_ABS, ABS_HAT0X, 1), (EV_KEY, BTN_SOUTH, 1)]))
+
+    def test_a_d_pad_direction_is_the_hat_or_a_button(self):
+        self.assertEqual(self.catch("dpad", [(EV_ABS, ABS_HAT0Y, -1)]), ("hat",))
+        self.assertEqual(self.catch("dpad", [(EV_KEY, BTN_DPAD_UP, 1)]), ("key", BTN_DPAD_UP))
+
+    def test_settled_is_everything_let_go_and_back_at_rest(self):
+        absinfo, rest = {ABS_X: (0, 255), ABS_Z: (0, 255)}, {ABS_X: 128, ABS_Z: 0}
+        self.assertTrue(hg.settled(set(), {ABS_X: 140, ABS_Z: 30}, rest, absinfo))
+        self.assertFalse(hg.settled({BTN_SOUTH}, {}, rest, absinfo))
+        self.assertFalse(hg.settled(set(), {ABS_X: 250}, rest, absinfo))
+
+    def test_a_pad_read_as_it_is_needs_no_lines(self):
+        learned = {"south": ("key", BTN_SOUTH), "west": ("key", BTN_NORTH), "north": ("key", BTN_WEST),
+                   "l2": ("axis", ABS_Z, False), "r2": ("axis", ABS_RZ, False), "up": ("hat",),
+                   "left_x": ("axis", ABS_X, False), "left_y": ("axis", ABS_Y, False),
+                   "right_x": ("axis", ABS_RX, False), "right_y": ("axis", ABS_RY, False), "capture": None}
+        self.assertEqual(hg.learn_lines(profile(XBOX_360), learned), [])
+
+    def test_a_joystick_pad_gets_the_lines_it_needs(self):
+        learned = {"south": ("key", BTN_THUMB2), "east": ("key", BTN_THUMB), "west": ("key", BTN_TOP),
+                   "north": ("key", BTN_TRIGGER), "l2": ("key", 0x126), "r2": ("key", 0x127),
+                   "up": ("hat",), "home": None,
+                   "left_x": ("axis", ABS_X, False), "left_y": ("axis", ABS_Y, True),
+                   "right_x": ("axis", ABS_Z, False), "right_y": ("axis", ABS_RZ, False)}
+        self.assertEqual(hg.learn_lines(profile(DRAGONRISE), learned),
+                         ["[buttons]", 'south = "BTN_THUMB2"', 'east = "BTN_THUMB"', 'west = "BTN_TOP"',
+                          'north = "BTN_TRIGGER"', 'l2 = "BTN_BASE"', 'r2 = "BTN_BASE2"', "",
+                          "[axes]", 'left_y = "-ABS_Y"'])
+
+    def test_a_trigger_learned_as_an_axis_where_a_button_was_expected(self):
+        learned = {"l2": ("axis", ABS_Z, False)}
+        self.assertEqual(hg.learn_lines(profile(DUALSENSE), learned), ["[axes]", 'l2 = "ABS_Z"'])
+
+    def test_the_lines_read_back_as_the_learned_pad(self):
+        """What learn prints, pasted into a config, makes the profile read the pad as it was learned."""
+        learned = {"south": ("key", BTN_THUMB2), "l2": ("key", 0x126), "left_y": ("axis", ABS_Y, True)}
+        lines = hg.learn_lines(profile(DRAGONRISE), learned)
+        tmp = Path(tempfile.mkdtemp())
+        self.addCleanup(shutil.rmtree, tmp)
+        (tmp / "config.toml").write_text("\n".join(lines) + "\n")
+        buttons, axes = hg.remaps(hg.load_config(tmp / "config.toml"))
+        shape = DRAGONRISE
+        found = hg.profile_for(shape["name"], shape["vendor"], shape["product"], shape["driver"], shape["keys"],
+                               shape["absinfo"], "", buttons, axes)
+        self.assertEqual((found.buttons[BTN_THUMB2], found.buttons[0x126], found.axes[ABS_Y].flip),
+                         ("south", "l2", True))
+        self.assertEqual(hg.learn_lines(found, learned), [])
+
+    def test_learn_without_a_pad_says_so(self):
+        import subprocess
+        proc = subprocess.run([sys.executable, str(SCRIPT), "learn", "--device", "/dev/input/event9999"],
+                              capture_output=True, text=True, timeout=10)
+        self.assertEqual(proc.returncode, 1)
+        self.assertRegex(proc.stdout, "No gamepad|python-evdev")
+
+
 class DeviceConfig(unittest.TestCase):
     def test_the_device_table(self):
         tmp = Path(tempfile.mkdtemp())
