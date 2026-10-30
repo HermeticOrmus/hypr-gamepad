@@ -579,6 +579,18 @@ class Example(unittest.TestCase):
         for control in hg.bindable("world"):
             self.assertRegex(text, rf"(?<![a-z_]){control}(?![a-z_])", "the example's list of controls")
 
+    def test_the_troubleshooting_page_quotes_what_the_program_says(self):
+        """Each problem on docs/troubleshooting.md starts from a message; the program must still say it."""
+        source = SCRIPT.read_text()
+        page = (ROOT / "docs/troubleshooting.md").read_text()
+        quoted = ["waiting for the pad", "Another program holds the pad", "no scroll: the virtual wheel could not be made",
+                  "not writable (install the udev rule)", "not readable (install the udev rule)", "none on this pad",
+                  "FAIL hyprland: it reads a hyprland.conf", "FAIL hyprland: does not answer", "Talk is not set up",
+                  "pad: not connected", "did not start"]
+        for message in quoted:
+            self.assertIn(message, page, "the page")
+            self.assertIn(message, source, "the program")
+
     def test_the_herdr_page_configs_load_as_they_are(self):
         """docs/herdr.md's hypr-gamepad blocks are configs a person pastes: each must load with no warning,
         and send the keys the herdr block beside it binds."""
