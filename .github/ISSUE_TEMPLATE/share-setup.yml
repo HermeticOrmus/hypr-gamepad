@@ -25,7 +25,7 @@ body:
     id: config
     attributes:
       label: Your setup
-      description: "Your config file (coming soon: ~/.config/hypr-gamepad/config.toml), or the lines you changed in the LAYOUT table. Remove anything private first."
+      description: "Your ~/.config/hypr-gamepad/config.toml. Remove anything private first (host names, your own tools' paths)."
       render: toml
     validations:
       required: true
@@ -37,7 +37,7 @@ body:
     id: buttons
     attributes:
       label: Anything your controller does differently
-      description: "For example: buttons that came out swapped, or a D-pad that did not answer. Paste what `python3 -m evdev.evtest` showed for them if you can."
+      description: "What `hypr-gamepad status` says on its \"read as\" line, and anything that came out wrong: buttons swapped, a D-pad or trigger that did not answer. If `hypr-gamepad learn` printed lines, paste them."
   - type: checkboxes
     id: credit
     attributes:

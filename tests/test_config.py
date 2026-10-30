@@ -561,6 +561,25 @@ class Example(unittest.TestCase):
         for control in hg.bindable("world"):
             self.assertRegex(text, rf"(?<![a-z_]){control}(?![a-z_])", "the example's list of controls")
 
+    def test_the_herdr_page_configs_load_as_they_are(self):
+        """docs/herdr.md's hypr-gamepad blocks are configs a person pastes: each must load with no warning,
+        and send the keys the herdr block beside it binds."""
+        text = (ROOT / "docs/herdr.md").read_text()
+        blocks = re.findall(r"```toml\n(.*?)```", text, re.S)
+        pad = [b for b in blocks if b.startswith("# ~/.config/hypr-gamepad/")]
+        herdr = [b for b in blocks if b.startswith("# ~/.config/herdr/")]
+        self.assertEqual((len(pad), len(herdr)), (2, 2))
+        for block, keys in zip(pad, herdr):
+            with tempfile.TemporaryDirectory() as tmp:
+                path = Path(tmp, "config.toml")
+                path.write_text(block)
+                with self.assertNoLogs(hg.log, "WARNING"):
+                    config = hg.load_config(path)
+            for field in hg.fields(hg.HerdrKeys):
+                sent = getattr(config.herdr.keys, field.name)
+                if sent != getattr(hg.HerdrKeys(), field.name):
+                    self.assertIn(f'"{sent}"', keys, field.name)        # herdr's side binds what the pad sends
+
 
 if __name__ == "__main__":
     unittest.main()

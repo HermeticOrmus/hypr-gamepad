@@ -26,11 +26,11 @@ Keys reach the window you pressed in through Hyprland's own `send_shortcut`: not
 
 ## Status
 
-Early, and in daily use with a PS5 DualSense. Other controllers are next: the code already reads the standard Linux gamepad buttons, and the work on scaling sticks and triggers of any pad, plus a `learn` command for unknown ones, is under way. If you try another pad, [share what you saw](https://github.com/HermeticOrmus/hypr-gamepad/issues/new?template=share-setup.yml).
+Early. In daily use with a PS5 DualSense. Any pad Linux calls a gamepad works too: Xbox pads (USB and Bluetooth), the Switch Pro Controller, a DualShock 4, most USB pads; `hypr-gamepad learn` sets up the rest. Those were built from the Linux drivers' own code and tested with virtual pads shaped like them; only the DualSense has run on real hardware so far. If you run another pad, [share your setup](https://github.com/HermeticOrmus/hypr-gamepad/issues/new?template=share-setup.yml): it is the most useful thing you can send.
 
 ## What the pad does
 
-Hold **Options** to see this on screen, for the window you are in.
+Hold **Options** (Menu on Xbox, Plus on Nintendo) to see this on screen, for the window you are in, in your pad's own names. The table uses the DualSense's; [Your controller](#your-controller) has the others.
 
 | Control | Inside the window | L2 held: the desktop |
 |---|---|---|
@@ -50,11 +50,36 @@ Hold **Options** to see this on screen, for the window you are in.
 
 The lightbar is gold at the desk, red while you talk and blue in game mode; the player lights show which screen has focus. Every control can be changed in the config.
 
+## Your controller
+
+hypr-gamepad takes the first pad Linux calls a gamepad and reads it by place: the bottom face button is `south` whatever is printed on it. On screen and in its notes it uses your pad's own names:
+
+| Place | DualSense | Xbox | Nintendo |
+|---|---|---|---|
+| south, east, west, north | Cross, Circle, Square, Triangle | A, B, X, Y | B, A, Y, X |
+| l1, r1 / l2, r2 | L1, R1 / L2, R2 | LB, RB / LT, RT | L, R / ZL, ZR |
+| select, start, home | Create, Options, PS | View, Menu, Xbox | Minus, Plus, Home |
+
+So on a Nintendo pad, B (south) is Enter and A (east) is Esc: the same places as every other pad. To swap them: `[layout.base]` `south = "escape"`, `east = "enter"`. Game mode is home + start (PS + Options), or select + start on a pad with no home button.
+
+```bash
+hypr-gamepad status         # the pad it found, and how it reads it
+hypr-gamepad map --pad xbox # the map in another family's names
+```
+
+Another pad on the desk: name it in the config (`[device] name = "Pro Controller"`). A pad that sends other codes than Linux's gamepad standard (some USB pads, some adapters) needs a few lines in `[buttons]` and `[axes]`; `learn` asks you to press each control and prints them:
+
+```bash
+systemctl --user stop hypr-gamepad   # learn needs the pad to itself
+hypr-gamepad learn                   # press what it asks; paste what it prints into your config
+systemctl --user start hypr-gamepad
+```
+
 ## Requirements
 
 - Hyprland 0.56 or newer with a Lua config (`hyprland.lua`, as current Omarchy has). An old `hyprland.conf` setup does not work: `hypr-gamepad check` tells you.
 - Python 3.11+ and python-evdev (`python-evdev` on Arch).
-- A PS5 DualSense or DualSense Edge, over Bluetooth or USB.
+- A gamepad, over Bluetooth or USB: a DualSense or DualSense Edge (lightbar, player lights and mic button too), an Xbox pad, a Switch Pro Controller, a DualShock 4, a USB pad.
 - Optional: [voice-flow](https://github.com/HermeticOrmus/voice-flow) or any dictation tool you can start and stop from a command; [herdr](https://herdr.dev); the Omarchy shell for the on-screen map.
 
 ## Install
@@ -90,15 +115,17 @@ hypr-gamepad run --dry      # press buttons: it prints what it would do, and doe
 `~/.config/hypr-gamepad/config.toml`. Every key is in [config.example.toml](config.example.toml) with its default. Set only what you change; `hypr-gamepad check` names any key it does not understand.
 
 - `[talk]`: voice-flow, any start/stop command pair, or none.
+- `[device]`: which pad, and its family's names.
+- `[buttons]`, `[axes]`: a pad's own codes, as `learn` prints them.
 - `[jump]`, `[board]`, `[wheel]`, `[ideas]`: what Triangle, PS and Create run.
-- `[herdr]`: the keys your herdr uses (herdr's own syntax, its defaults out of the box).
+- `[herdr]`: the keys your herdr uses (herdr's own syntax, its defaults out of the box). [docs/herdr.md](docs/herdr.md) has prefix-free keys, and agents and workspaces on the left stick.
 - `[layout.base]`, `[layout.world]`: move any action to any control.
 
 ## Share your setup
 
 A whole setup is one config file. [setups/](setups/) holds the ones people run, starting with the author's: a DualSense, herdr with Alt chords, voice-flow and a few tools of his own.
 
-Show yours: [open a "Share your setup" issue](https://github.com/HermeticOrmus/hypr-gamepad/issues/new?template=share-setup.yml) with your controller, your system and your config. Different controllers are the most useful: they show what works beyond the DualSense.
+Show yours: [open a "Share your setup" issue](https://github.com/HermeticOrmus/hypr-gamepad/issues/new?template=share-setup.yml) with your controller, what `hypr-gamepad status` says about it, your system and your config. Different controllers are the most useful: they show what works beyond the DualSense. [setups/README.md](setups/README.md) says how a setup is laid out.
 
 ## Tests
 
