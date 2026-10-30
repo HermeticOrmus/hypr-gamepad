@@ -179,6 +179,41 @@ FAMILY_NAMES = {
                 "start": "Start", "home": "Home"},
 }
 FACE = ("south", "east", "west", "north")
+# The controls a [buttons] line may give a code: every button, the D-pad and the triggers.
+BUTTON_CONTROLS = ("south", "east", "west", "north", "l1", "r1", "l2", "r2", "l3", "r3", "select", "start",
+                   "home", "capture", "up", "down", "left", "right")
+# What an [axes] line names: a stick's axis, or a trigger read from an axis.
+REMAP_AXES = {"left_x": "lx", "left_y": "ly", "right_x": "rx", "right_y": "ry", "l2": "l2", "r2": "r2"}
+# The kernel's names for the codes a pad may send (linux/input-event-codes.h), for [buttons] and
+# [axes] and for what `learn` prints; a number works as well ("0x134", "308"). A code's first name
+# here is the one printed; BTN_A, BTN_B, BTN_X, BTN_Y are the face buttons' older names.
+BUTTON_CODES = {
+    "BTN_SOUTH": 0x130, "BTN_EAST": 0x131, "BTN_C": 0x132, "BTN_NORTH": 0x133, "BTN_WEST": 0x134, "BTN_Z": 0x135,
+    "BTN_TL": 0x136, "BTN_TR": 0x137, "BTN_TL2": 0x138, "BTN_TR2": 0x139, "BTN_SELECT": 0x13A,
+    "BTN_START": 0x13B, "BTN_MODE": 0x13C, "BTN_THUMBL": 0x13D, "BTN_THUMBR": 0x13E,
+    "BTN_DPAD_UP": 0x220, "BTN_DPAD_DOWN": 0x221, "BTN_DPAD_LEFT": 0x222, "BTN_DPAD_RIGHT": 0x223,
+    "BTN_GRIPL": 0x224, "BTN_GRIPR": 0x225, "BTN_GRIPL2": 0x226, "BTN_GRIPR2": 0x227,
+    "BTN_TRIGGER": 0x120, "BTN_THUMB": 0x121, "BTN_THUMB2": 0x122, "BTN_TOP": 0x123, "BTN_TOP2": 0x124,
+    "BTN_PINKIE": 0x125, "BTN_BASE": 0x126, "BTN_BASE2": 0x127, "BTN_BASE3": 0x128, "BTN_BASE4": 0x129,
+    "BTN_BASE5": 0x12A, "BTN_BASE6": 0x12B, "BTN_DEAD": 0x12F, "KEY_RECORD": KEY_RECORD,
+    **{f"BTN_{n}": 0x100 + n for n in range(10)},
+    **{f"BTN_TRIGGER_HAPPY{n}": 0x2BF + n for n in range(1, 41)},
+    "BTN_A": 0x130, "BTN_B": 0x131, "BTN_X": 0x133, "BTN_Y": 0x134,
+}
+AXIS_CODES = {"ABS_X": 0x00, "ABS_Y": 0x01, "ABS_Z": 0x02, "ABS_RX": 0x03, "ABS_RY": 0x04, "ABS_RZ": 0x05,
+              "ABS_THROTTLE": 0x06, "ABS_RUDDER": 0x07, "ABS_WHEEL": 0x08, "ABS_GAS": 0x09, "ABS_BRAKE": 0x0A,
+              **{f"ABS_HAT{n}{axis}": 0x10 + 2 * n + (axis == "Y") for n in range(4) for axis in "XY"}}
+BUTTON_NAMES = {code: name for name, code in reversed(BUTTON_CODES.items())}
+AXIS_NAMES = {code: name for name, code in reversed(AXIS_CODES.items())}
+
+
+def code_of(text: str, names: dict[str, int]) -> int:
+    """A code from its kernel name or a number."""
+    if text in names:
+        return names[text]
+    if re.fullmatch(r"0x[0-9a-fA-F]+|[0-9]+", text):
+        return int(text, 0)
+    raise ValueError(f"{text!r} is not a code: a kernel name such as {next(iter(names))}, or a number")
 STICK_ROLES = {"lx": ("left", 0), "ly": ("left", 1), "rx": ("right", 0), "ry": ("right", 1)}
 LAYER_KEY = "l2"  # held: the world layer
 GAME_CHORD = frozenset({"home", "start"})  # together: game mode on / off
@@ -305,6 +340,8 @@ class LayoutConfig:
 @dataclass(frozen=True)
 class Config:
     device: DeviceConfig = field(default_factory=DeviceConfig)
+    buttons: dict[str, str] = field(default_factory=dict)  # control -> the code this pad sends for it
+    axes: dict[str, str] = field(default_factory=dict)     # left_x .. r2 -> "[-]ABS_..." or "" for none
     talk: TalkConfig = field(default_factory=TalkConfig)
     jump: JumpConfig = field(default_factory=JumpConfig)
     board: BoardConfig = field(default_factory=BoardConfig)
@@ -383,15 +420,35 @@ def build(cls: type, table: Any, where: str, warnings: list[str]) -> Any:
             if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
                 raise ConfigError(f"{name} must be a list of strings")
             values[key] = tuple(value)
-        else:  # a layout side: control -> action name
+        else:  # a table of names: a layout side, [buttons], [axes]
             if not isinstance(value, dict) or not all(isinstance(v, str) for v in value.values()):
-                raise ConfigError(f"{name} must be a table of control = \"action\"")
+                raise ConfigError(f"{name} must be a table of name = \"text\"")
             values[key] = dict(value)
     return cls(**values)
 
 
 def validate(config: Config) -> None:
     """What the types do not say: the backends, what each needs, herdr's keys, the layout's names."""
+    named: dict[str, str] = {}
+    for control, text in config.buttons.items():
+        place = CONTROL_ALIASES.get(control, control)
+        if place not in BUTTON_CONTROLS:
+            raise ConfigError(f"buttons.{control}: not a button ({', '.join(BUTTON_CONTROLS)})")
+        if place in named:
+            raise ConfigError(f"buttons: {named[place]} and {control} are the same control")
+        named[place] = control
+        try:
+            code_of(text, BUTTON_CODES)
+        except ValueError as exc:
+            raise ConfigError(f"buttons.{control}: {exc}") from None
+    for role, text in config.axes.items():
+        if role not in REMAP_AXES:
+            raise ConfigError(f"axes.{role}: not one of {', '.join(REMAP_AXES)}")
+        try:
+            if text:
+                code_of(text.removeprefix("-"), AXIS_CODES)
+        except ValueError as exc:
+            raise ConfigError(f"axes.{role}: {exc}") from None
     if config.device.family and config.device.family not in FAMILIES:
         raise ConfigError(f"device.family: {config.device.family!r} is not one of {', '.join(FAMILIES)}")
     for name, value, choices in (("talk.backend", config.talk.backend, TALK_BACKENDS),
@@ -447,18 +504,21 @@ class Axis:
     role: str
     low: int
     high: int
+    flip: bool = False  # [axes] "-ABS_...": the axis runs the other way
 
     def tilt(self, value: int) -> float:
         """A stick, -1 to 1 around its centre: a DualSense's 0..255 gives (value - 128) / 127 as it
         always did, xpad's -32768..32767 value / 32767."""
         centre = (self.low + self.high + 1) // 2
         half = self.high - centre
-        return max(-1.0, min(1.0, (value - centre) / half)) if half > 0 else 0.0
+        tilt = max(-1.0, min(1.0, (value - centre) / half)) if half > 0 else 0.0
+        return -tilt if self.flip else tilt
 
     def travel(self, value: int) -> float:
         """A trigger, 0 at rest to 1 pressed fully."""
         span = self.high - self.low
-        return max(0.0, min(1.0, (value - self.low) / span)) if span > 0 else 0.0
+        travel = max(0.0, min(1.0, (value - self.low) / span)) if span > 0 else 0.0
+        return 1.0 - travel if self.flip else travel
 
 
 def dualsense_axes() -> dict[int, Axis]:
@@ -516,9 +576,12 @@ def is_gamepad(keys: set[int], axes: set[int]) -> bool:
 
 
 def profile_for(name: str, vendor: int, product: int, driver: str, keys: set[int],
-                absinfo: dict[int, tuple[int, int]], family: str = "") -> Profile:
+                absinfo: dict[int, tuple[int, int]], family: str = "",
+                button_map: dict[str, int] | None = None,
+                axis_map: dict[str, tuple[int, bool] | None] | None = None) -> Profile:
     """Read a pad from what it reports: its key codes, its axes with their (min, max), its driver and
-    USB ids. `family` ([device] family) overrides the one its driver and maker give."""
+    USB ids. `family` ([device] family) overrides the one its driver and maker give; `button_map` and
+    `axis_map` ([buttons], [axes], through remaps) override what the kernel's spec would make of it."""
     family = family or FAMILY_DRIVERS.get(driver) or FAMILY_VENDORS.get(vendor, "generic")
     buttons = {code: control for code, control in BUTTONS.items() if code in keys}
     buttons.update({code: control for code, control in FAMILY_BUTTONS.get(family, {}).items() if code in keys})
@@ -554,9 +617,29 @@ def profile_for(name: str, vendor: int, product: int, driver: str, keys: set[int
             if code in absinfo and code not in axes:
                 take(code, control)
                 break
+    for control, code in (button_map or {}).items():  # a control has one code; a trigger button, no axis
+        buttons = {have: name for have, name in buttons.items() if name != control}
+        buttons[code] = control
+        axes = {have: axis for have, axis in axes.items() if axis.role != control}
+    for role, target in (axis_map or {}).items():     # a trigger axis takes the place of its button
+        axes = {have: axis for have, axis in axes.items() if axis.role != role}
+        if role in ("l2", "r2"):
+            buttons = {have: name for have, name in buttons.items() if name != role}
+        if target is not None and target[0] in absinfo:
+            code, flip = target
+            axes[code] = Axis(role, *absinfo[code], flip)
     controls = set(buttons.values())
     chord = GAME_CHORD if GAME_CHORD <= controls else frozenset({"select", "start"})
     return Profile(name, family, vendor, product, buttons, axes, chord)
+
+
+def remaps(config: Config) -> tuple[dict[str, int], dict[str, tuple[int, bool] | None]]:
+    """[buttons] and [axes], read: control -> code, and axis role -> (code, flipped) or None."""
+    buttons = {CONTROL_ALIASES.get(control, control): code_of(text, BUTTON_CODES)
+               for control, text in config.buttons.items()}
+    axes = {REMAP_AXES[role]: (code_of(text.removeprefix("-"), AXIS_CODES), text.startswith("-")) if text else None
+            for role, text in config.axes.items()}
+    return buttons, axes
 
 
 def driver_of(path: str, sysfs: str = "/sys") -> str:
@@ -622,7 +705,7 @@ def scan_profile(device: Device) -> Profile:
     """A pad's profile from sysfs alone: its names, family and chord are all there; its axes' ranges
     are not (the map needs none of them)."""
     return profile_for(device.name, device.vendor, device.product, device.driver, set(device.keys),
-                       {code: (0, 0) for code in device.axes}, CONFIG.device.family)
+                       {code: (0, 0) for code in device.axes}, CONFIG.device.family, *remaps(CONFIG))
 
 
 def event_number(path: str) -> int:
@@ -2462,7 +2545,7 @@ def profile_of(dev: Any) -> Profile:
     caps = dev.capabilities()
     absinfo = {code: (info.min, info.max) for code, info in caps.get(EV_ABS, [])}
     return profile_for(dev.name, dev.info.vendor, dev.info.product, driver_of(dev.path),
-                       set(caps.get(EV_KEY, [])), absinfo, CONFIG.device.family)
+                       set(caps.get(EV_KEY, [])), absinfo, CONFIG.device.family, *remaps(CONFIG))
 
 
 # A DualSense (0CE6) and a DualSense Edge (0DF2): the pads with the mic button, in the reports

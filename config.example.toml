@@ -13,6 +13,19 @@
 # name = ""                       # the pad whose name holds this text, as `hypr-gamepad status` shows it
 # family = ""                     # playstation | xbox | nintendo | generic; "" = from its driver and maker
 
+# A pad that sends other codes than the kernel's gamepad spec says (south for the bottom face
+# button, BTN_TL2 for L2, the right stick on ABS_RX / ABS_RY): which code is which control. Codes go
+# by their kernel names (BTN_THUMB2, BTN_TRIGGER_HAPPY1, ABS_Z) or numbers ("0x134"). `hypr-gamepad
+# learn` prints these lines for the pad in your hand. For example, a plain USB pad:
+#   south = "BTN_THUMB2"
+#   east = "BTN_THUMB"
+# [buttons]                       # south east west north l1 r1 l2 r2 l3 r3 select start home capture up down left right
+
+# A stick's or a trigger's axis; a leading - flips it, "" takes it away. For example:
+#   right_x = "ABS_Z"
+#   left_y = "-ABS_Y"
+# [axes]                          # left_x left_y right_x right_y l2 r2
+
 # Talk: R2 held talks and letting go ends it, a tap keeps listening until the next press; the mic
 # button starts and the next press ends; Circle drops the take.
 # [talk]
