@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- `install.sh`: one command for your user (no sudo); `--enable` starts it, `--uninstall` takes it out. The udev rule also opens `/dev/uinput` to group `input`, for the scroll wheel on any desk.
 - `check` says in one line when Hyprland takes no Lua (a `hyprland.conf` setup, or a Hyprland older than 0.56) or does not answer, instead of a FAIL for every action.
 - `hypr-gamepad learn` asks for each control in turn and prints the `[buttons]` and `[axes]` lines the pad needs, or says it needs none. `--device` and `[device] name` may name a joystick-style pad the kernel does not call a gamepad; never a keyboard, a mouse or a touchpad.
 - `[buttons]` and `[axes]` name a pad's own codes when it does not follow the kernel's gamepad spec (a plain USB pad with joystick buttons, a stick on other axes, an axis that runs the other way).

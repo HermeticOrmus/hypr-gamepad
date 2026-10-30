@@ -59,42 +59,31 @@ The lightbar is gold at the desk, red while you talk and blue in game mode; the 
 
 ## Install
 
-There is no installer yet; these are the steps it will run.
-
 ```bash
 git clone https://github.com/HermeticOrmus/hypr-gamepad.git
 cd hypr-gamepad
-install -Dm755 hypr-gamepad ~/.local/bin/hypr-gamepad
-install -Dm644 systemd/hypr-gamepad.service ~/.config/systemd/user/hypr-gamepad.service
-mkdir -p ~/.config/hypr-gamepad
-cp -n config.example.toml ~/.config/hypr-gamepad/config.toml
+./install.sh
 ```
 
-The lightbar, the player lights and the mic button need one udev rule and your user in group `input` (the pad works without them):
+`install.sh` works for your user only, with no sudo: the program in `~/.local/bin`, the user service, a config at `~/.config/hypr-gamepad/config.toml` (only if you have none) and, with the Omarchy shell, the on-screen map. It then lists what only you can fix (python-evdev, group `input`, `~/.local/bin` on your PATH) and prints root's part, the udev rule:
 
 ```bash
 sudo install -m 0644 udev/60-hypr-gamepad.rules /etc/udev/rules.d/
-sudo udevadm control --reload-rules        # then turn the pad off and on
+sudo udevadm control --reload-rules && sudo udevadm trigger --name-match=uinput
 ```
 
-Smooth scrolling makes a virtual mouse wheel, so your user needs write access to `/dev/uinput` (group `input` on most setups).
+The rule gives group `input` a DualSense's lightbar, player lights and mic button, and `/dev/uinput` for the smooth-scroll wheel (any pad). The pad works without it. Group `input` can read every keyboard and, with the rule, make virtual devices: put only people you trust at this desk in it.
 
-Try it before you enable it:
+Try it, then start it for good:
 
 ```bash
-hypr-gamepad check          # reads the config and builds every action in your Hyprland, running none
+hypr-gamepad check          # your config, then every action built in your Hyprland, running none
+hypr-gamepad status         # the pad it found and how it reads it
 hypr-gamepad run --dry      # press buttons: it prints what it would do, and does nothing
-systemctl --user daemon-reload
-systemctl --user enable --now hypr-gamepad
+./install.sh --enable       # start the service now and at each login (and the map)
 ```
 
-The on-screen map, with the Omarchy shell:
-
-```bash
-cp -r omarchy/ormus.hypr-gamepad-map ~/.config/omarchy/plugins/
-omarchy plugin enable ormus.hypr-gamepad-map
-omarchy restart shell
-```
+`./install.sh` again updates the program and keeps your config; `./install.sh --uninstall` takes out what it put in.
 
 ## Config
 
