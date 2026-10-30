@@ -2984,7 +2984,22 @@ def learn(device: str | None, wait: float) -> int:
 
 
 def check(hypr: Hypr) -> int:
-    """Builds every action's dispatcher in the running Hyprland without running one. 0 = all build."""
+    """Builds every action's dispatcher in the running Hyprland without running one. 0 = all build. A
+    Hyprland that takes no Lua (a hyprland.conf setup, or one older than 0.56) gets one line."""
+    answer = hypr.request("eval local _ = 1")
+    reply = (answer or "").strip()
+    if answer is None:
+        print("FAIL hyprland: does not answer (is it running in this session?)")
+        return 1
+    if reply != "ok":
+        if "lua config manager" in reply:  # 0.56's answer with a hyprland.conf
+            print("FAIL hyprland: it reads a hyprland.conf; hypr-gamepad needs a Lua config (hyprland.lua, Hyprland 0.56+)")
+        elif "unknown request" in reply:   # before 0.56: no eval at all
+            print("FAIL hyprland: too old; hypr-gamepad needs Hyprland 0.56+ with a Lua config")
+        else:
+            print(f"FAIL hyprland: {reply}")
+        return 1
+    print("ok   hyprland: Lua config")
     failed = 0
     extra = {"scroll_pointer": POINTER_TO.format(x=0, y=0)}  # dispatchers that are not a control's
     if CONFIG.wheel.plugin:
