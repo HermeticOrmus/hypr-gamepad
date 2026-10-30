@@ -4,7 +4,7 @@
 
 // Where the map says the pad is, from the kind hypr-gamepad read for the focused window.
 function kindPhrase(kind) {
-    return ({ herdr: "inside herdr", browser: "in the browser", board: "on the Sun board",
+    return ({ herdr: "inside herdr", browser: "in the browser", board: "on the board",
               terminal: "in a terminal" })[kind] || "in this window"
 }
 
