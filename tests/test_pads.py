@@ -744,6 +744,66 @@ class Learn(unittest.TestCase):
                          ("south", "l2", True))
         self.assertEqual(hg.learn_lines(found, learned), [])
 
+    def test_learn_reads_every_event_of_a_batch_and_waits_only_to_settle(self):
+        """A press and its release often come in one read. learn caught the press, dropped the rest of
+        the batch with the release, then waited for a release that never came: 3 s on every step, and a
+        quick press of the next control was taken while it waited (found with a virtual pad)."""
+        import io
+        import os
+        import time
+        from contextlib import redirect_stdout
+        from unittest import mock
+
+        class Event:
+            def __init__(self, etype, code, value):
+                self.type, self.code, self.value = etype, code, value
+
+        class Info:
+            min, max, value = 0, 255, 128
+
+        class Pad:
+            name, path = "a test pad", "/dev/input/event999"
+
+            class info:
+                vendor, product = 0x0079, 0x0006
+
+            def __init__(self, batches):
+                self.batches = list(batches)
+                self.fd, self.feed = os.pipe()
+                os.write(self.feed, b"x" * len(self.batches))
+
+            def capabilities(self):
+                return {EV_KEY: list(range(BTN_TRIGGER, 0x12C)), EV_ABS: [(ABS_X, Info()), (ABS_Y, Info())]}
+
+            def grab(self):
+                pass
+
+            def ungrab(self):
+                pass
+
+            def read(self):
+                if not self.batches:
+                    raise BlockingIOError
+                os.read(self.fd, 1)
+                return iter(self.batches.pop(0))
+
+            def close(self):
+                os.close(self.fd)
+                os.close(self.feed)
+
+        # South, east, west, north: each press and its release in one batch, all of them waiting at once.
+        batches = [[Event(EV_KEY, code, 1), Event(0, 0, 0), Event(EV_KEY, code, 0), Event(0, 0, 0)]
+                   for code in (BTN_THUMB2, BTN_THUMB, BTN_TOP, BTN_TRIGGER)]
+        pad = Pad(batches)
+        steps = [step for step in hg.LEARN_STEPS if step[0] in ("south", "east", "west", "north")]
+        out = io.StringIO()
+        started = time.monotonic()
+        with mock.patch.object(hg, "find_pad", lambda path=None: pad), mock.patch.object(hg, "LEARN_STEPS", steps), \
+                redirect_stdout(out):
+            self.assertEqual(hg.learn(None, 1.0), 0)
+        self.assertLess(time.monotonic() - started, 1.0, out.getvalue())
+        self.assertIn('south = "BTN_THUMB2"\neast = "BTN_THUMB"\nwest = "BTN_TOP"\nnorth = "BTN_TRIGGER"', out.getvalue())
+
     def test_learn_without_a_pad_says_so(self):
         import subprocess
         proc = subprocess.run([sys.executable, str(SCRIPT), "learn", "--device", "/dev/input/event9999"],
