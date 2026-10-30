@@ -541,6 +541,90 @@ class ReadyNote(unittest.TestCase):
                          "Microsoft X-Box 360 pad ready: Battery unknown. Hold LT for the desktop.")
 
 
+BTN_TRIGGER, BTN_THUMB, BTN_THUMB2, BTN_TOP = 0x120, 0x121, 0x122, 0x123
+DRAGONRISE = dict(name="DragonRise Inc. Generic USB Joystick", vendor=0x0079, product=0x0006, driver="hid-generic",
+                  keys=set(range(BTN_TRIGGER, 0x12C)),                 # BTN_TRIGGER .. BTN_BASE6: no BTN_SOUTH
+                  absinfo={ABS_X: (0, 255), ABS_Y: (0, 255), ABS_Z: (0, 255), ABS_RZ: (0, 255), **HAT})
+
+
+class Remaps(PadCase):
+    """A pad that sends other codes than the kernel's gamepad spec says: [buttons] names the code of a
+    control, [axes] the axis of a stick or trigger (a leading - flips it, "" takes it away)."""
+
+    def write(self, toml: str) -> Path:
+        path = self.tmp / "config.toml"
+        path.write_text(toml)
+        return path
+
+    def remapped(self, shape: dict, toml: str) -> "hg.Profile":
+        hg.CONFIG = hg.load_config(self.write(toml))
+        buttons, axes = hg.remaps(hg.CONFIG)
+        return hg.profile_for(shape["name"], shape["vendor"], shape["product"], shape["driver"], shape["keys"],
+                              shape["absinfo"], "", buttons, axes)
+
+    def test_buttons_name_the_code_of_a_control(self):
+        found = self.remapped(NO_HOME, '[buttons]\nnorth = "BTN_WEST"\nwest = "0x133"\n')
+        self.assertEqual((found.buttons[BTN_WEST], found.buttons[BTN_NORTH]), ("north", "west"))
+        found = self.remapped(NO_HOME, '[buttons]\ntriangle = "BTN_Y"\n')       # PlayStation name, old code name
+        self.assertEqual(found.buttons[BTN_WEST], "north")
+        self.assertNotIn("north", [found.buttons[c] for c in found.buttons if c != BTN_WEST])
+
+    def test_a_joystick_pad_works_once_its_buttons_are_named(self):
+        toml = ('[device]\nname = "Generic USB Joystick"\n\n[buttons]\nsouth = "BTN_THUMB2"\neast = "BTN_THUMB"\n'
+                'west = "BTN_TOP"\nnorth = "BTN_TRIGGER"\nl2 = "BTN_BASE"\nselect = "BTN_BASE3"\nstart = "BTN_BASE4"\n')
+        found = self.remapped(DRAGONRISE, toml)
+        self.assertEqual((found.axes[ABS_Z].role, found.axes[ABS_RZ].role), ("rx", "ry"))
+        self.assertEqual(found.chord, frozenset({"select", "start"}))
+        hypr, procs = Hypr(), self.tmp / "proc"
+        procs.mkdir()
+        pad = hg.Pad(hypr, Fx(), Clock(), windows=hg.Windows(hypr, str(procs)), voice=self.tmp, profile=found)
+        pad.feed(EV_KEY, 0x126, 1)                                     # BTN_BASE: L2, the desktop side
+        pad.feed(EV_KEY, BTN_THUMB2, 1)
+        self.assertEqual(hypr.sent, [FULLSCREEN])
+
+    def test_a_trigger_named_as_a_button_drops_its_axis_and_the_other_way_round(self):
+        found = self.remapped(XBOX_360, '[buttons]\nl2 = "BTN_TL"\nl1 = "BTN_THUMBL"\n')
+        self.assertNotIn("l2", {axis.role for axis in found.axes.values()})
+        self.assertEqual(found.buttons[BTN_TL], "l2")
+        found = self.remapped(PRO, '[axes]\nl2 = ""\n')
+        self.assertNotIn("l2", found.buttons.values())                # ZL is gone
+        self.assertEqual(found.buttons[BTN_TR2], "r2")
+
+    def test_axes_name_a_stick_or_trigger_axis_and_may_flip_it(self):
+        found = self.remapped(XBOX_360, '[axes]\nright_x = "ABS_Z"\nright_y = "-ABS_RZ"\nl2 = "ABS_RX"\nr2 = ""\n')
+        roles = {code: (axis.role, axis.flip) for code, axis in found.axes.items()}
+        self.assertEqual(roles[ABS_Z], ("rx", False))
+        self.assertEqual(roles[ABS_RZ], ("ry", True))
+        self.assertEqual(roles[ABS_RX], ("l2", False))
+        self.assertNotIn(ABS_RY, roles)                               # the old right stick y: taken by nothing
+        self.assertEqual(found.axes[ABS_RZ].tilt(0), 1.0)              # flipped: 0 of 0..255 reads as full down
+        self.assertEqual(hg.Axis("l2", 0, 255, True).travel(255), 0.0)
+
+    def test_an_axis_the_pad_lacks_is_left_out(self):
+        found = self.remapped(NO_HOME, '[axes]\nright_x = "ABS_RX"\n')
+        self.assertNotIn(ABS_RX, found.axes)
+
+    def test_the_tables_are_checked_by_name(self):
+        for toml, where in (('[buttons]\nnorth = "BTN_NOPE"\n', "buttons.north"),
+                            ('[buttons]\nwing = "BTN_SOUTH"\n', "buttons.wing"),
+                            ('[buttons]\nls_up = "BTN_SOUTH"\n', "buttons.ls_up"),
+                            ('[buttons]\ntriangle = "BTN_WEST"\nnorth = "BTN_NORTH"\n', "buttons"),
+                            ('[axes]\nlx = "ABS_X"\n', "axes.lx"),
+                            ('[axes]\nright_x = "BTN_SOUTH"\n', "axes.right_x"),
+                            ('[buttons]\nnorth = 308\n', "buttons")):
+            with self.assertRaises(hg.ConfigError, msg=toml) as caught:
+                hg.load_config(self.write(toml))
+            self.assertIn(where, str(caught.exception), toml)
+
+    def test_check_reports_a_bad_table(self):
+        import subprocess
+        proc = subprocess.run([sys.executable, str(SCRIPT), "check", "--config",
+                               str(self.write('[axes]\nright_x = "ABS_NOPE"\n'))], capture_output=True, text=True,
+                              timeout=10)
+        self.assertEqual(proc.returncode, 1)
+        self.assertIn("axes.right_x", proc.stdout)
+
+
 class DeviceConfig(unittest.TestCase):
     def test_the_device_table(self):
         tmp = Path(tempfile.mkdtemp())
