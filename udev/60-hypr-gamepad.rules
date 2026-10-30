@@ -1,4 +1,4 @@
-# hypr-gamepad: the DualSense's lights, and its raw reports to read, for group input.
+# hypr-gamepad: the DualSense's lights, its raw reports to read, and the scroll wheel, for group input.
 #
 # Installed by hand, as root (it lives under /etc, where the user service never writes):
 #   sudo install -m 0644 udev/60-hypr-gamepad.rules /etc/udev/rules.d/
@@ -14,3 +14,8 @@ ACTION=="add", SUBSYSTEM=="leds", KERNEL=="input*:white:player-*", SUBSYSTEMS=="
 # it). Read only, for group input (the desktop user's group, as other gamepad hidraw rules do):
 # hypr-gamepad never writes to the pad's raw node, so nothing may.
 SUBSYSTEM=="hidraw", KERNELS=="*:054C:0CE6.*|*:054C:0DF2.*", GROUP="input", MODE="0640"
+# Smooth scrolling: hypr-gamepad makes a virtual mouse wheel through /dev/uinput, for any pad. Some
+# packages open it to group input already (ydotool's 80-uinput.rules does); this says it for everyone.
+# Group input can read every keyboard and, with this, make virtual devices: give it only to people you
+# trust at this desk.
+KERNEL=="uinput", SUBSYSTEM=="misc", GROUP="input", MODE="0660", OPTIONS+="static_node=uinput"
